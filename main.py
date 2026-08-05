@@ -1,5 +1,9 @@
 import os
 import sys
+import random
+import threading
+import itertools
+import time
 from dotenv import load_dotenv
 
 # Ensure we can import from the ultron package
@@ -35,8 +39,49 @@ def main():
             if not user_input.strip():
                 continue
                 
-            response = brain.process_input(user_input)
-            print(f"\nUltron: {response}")
+            LOADING_MESSAGES = [
+                "Please, let me check first...",
+                "Finding the details for you...",
+                "Give me a second to process that...",
+                "Working on it...",
+                "Scanning my databanks...",
+                "Let me see what I can find...",
+                "Hold on, digging through the web...",
+                "Fetching the requested information...",
+                "Analyzing your request...",
+                "Just a moment...",
+                "Looking into it right now...",
+                "Gathering the necessary details...",
+                "Calculating possibilities...",
+                "Let me pull that up for you...",
+                "One moment please...",
+                "Processing your command...",
+                "Checking my memory banks...",
+                "Connecting to the mainframe...",
+                "Reviewing the data...",
+                "Retrieving information..."
+            ]
+            msg = random.choice(LOADING_MESSAGES)
+            done = False
+            
+            def spin():
+                spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+                while not done:
+                    sys.stdout.write(f"\rUltron: {msg} {next(spinner)}")
+                    sys.stdout.flush()
+                    time.sleep(0.1)
+                    
+            spinner_thread = threading.Thread(target=spin)
+            spinner_thread.start()
+            
+            try:
+                response = brain.process_input(user_input)
+            finally:
+                done = True
+                spinner_thread.join()
+                sys.stdout.write('\r' + ' ' * (len(msg) + 20) + '\r') # Clear the line
+                
+            print(f"Ultron: {response}")
             
         except KeyboardInterrupt:
             print("\n\nUltron: Interrupted by user. Goodbye!")

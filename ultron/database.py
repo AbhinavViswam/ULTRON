@@ -46,6 +46,19 @@ class Database:
                 )
             ''')
             
+            # Create memories table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    importance INTEGER DEFAULT 5,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             conn.commit()
 
     def save_message(self, session_id: str, role: str, message: str):
@@ -77,4 +90,41 @@ class Database:
                 FROM tasks 
                 WHERE status = 'pending'
             ''')
+            return cursor.fetchall()
+            
+    def save_memory(self, category: str, key: str, value: str, importance: int):
+        """Save a new memory to the database."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO memories (category, key, value, importance)
+                VALUES (?, ?, ?, ?)
+            ''', (category, key, value, importance))
+            conn.commit()
+            
+    def search_memories(self, query: str):
+        """Search memories using a basic LIKE query."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            search_term = f"%{query}%"
+            cursor.execute('''
+                SELECT category, key, value, importance, created_at 
+                FROM memories 
+                WHERE key LIKE ? OR value LIKE ?
+                ORDER BY importance DESC
+            ''', (search_term, search_term))
+            return cursor.fetchall()
+            
+    def search_chat_history(self, query: str, limit: int = 3):
+        """Search past conversations in chat history using a basic LIKE query."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            search_term = f"%{query}%"
+            cursor.execute('''
+                SELECT role, message, timestamp
+                FROM chat_history
+                WHERE message LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (search_term, limit))
             return cursor.fetchall()
