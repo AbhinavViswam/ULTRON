@@ -11,7 +11,7 @@ from ultron.automation import (
     open_application, close_application, system_media_control, 
     search_spotify, adjust_volume, take_screenshot, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
-    read_clipboard, find_files, read_file_content, system_power_control
+    read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control
 )
 
 class ToolBridge:
@@ -33,7 +33,6 @@ class ToolBridge:
         }
         
         for name, param in sig.parameters.items():
-            # Simplistic type mapping
             param_type = "string"
             if param.annotation == int:
                 param_type = "integer"
@@ -153,6 +152,7 @@ class Brain:
             "write_in_notepad": write_in_notepad,
             "send_whatsapp_message": send_whatsapp_message,
             "read_clipboard": read_clipboard,
+            "copy_to_clipboard": copy_to_clipboard,
             "find_files": find_files,
             "read_file_content": read_file_content,
             "system_power_control": system_power_control
@@ -194,7 +194,7 @@ You have full interactive control over a web browser.
 - SYSTEM HEALTH: Use `get_system_health` to check CPU, RAM, Battery %, and Disk storage space.
 - WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
-- CLIPBOARD: Use `read_clipboard` to inspect or summarize copied text.
+- CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
 - FILE SEARCH & READ: Use `find_files` to locate files on Desktop/Downloads and `read_file_content` to read text files.
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown."""
         

@@ -522,6 +522,18 @@ def read_clipboard() -> str:
     except Exception as e:
         return f"Failed to read clipboard: {e}"
 
+def copy_to_clipboard(text: str) -> str:
+    """Copies the specified text directly to the Windows Clipboard.
+    Args:
+        text: The text string to copy (e.g. link, URL, note, code).
+    """
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return f"Successfully copied to clipboard: '{text}'"
+    except Exception as e:
+        return f"Failed to copy to clipboard: {e}"
+
 def find_files(search_query: str, location: str = 'Desktop') -> str:
     """Finds files matching search_query in Desktop, Downloads, or Documents folder.
     Args:

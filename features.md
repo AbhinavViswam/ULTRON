@@ -57,8 +57,8 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 ### 3. PC Health & Hardware Monitor (`get_system_health`)
 - **Resource Stats:** Powered by `psutil`, reports CPU utilization %, RAM used/total, Storage free space, and Battery charging status %.
 
-### 4. Clipboard Reader & Summarizer (`read_clipboard`)
-- **Windows Clipboard Access:** Reads or summarizes text copied to the Windows Clipboard (`pyperclip`).
+### 4. Clipboard Engine (`read_clipboard`, `copy_to_clipboard`)
+- **Windows Clipboard Management:** Reads, inspects, or copies any text, link, URL, or note directly to your Windows Clipboard (`pyperclip`).
 
 ### 5. File Finder & Document Reader (`find_files`, `read_file_content`)
 - **File Search:** Locates files on Desktop, Downloads, or Documents folders.
