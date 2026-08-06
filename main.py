@@ -4,7 +4,26 @@ import random
 import threading
 import itertools
 import time
+import datetime
+import ctypes
 from dotenv import load_dotenv
+
+def reminder_worker(db):
+    """Background thread to check for pending reminders and show a popup."""
+    while True:
+        try:
+            tasks = db.get_pending_tasks()
+            now_iso = datetime.datetime.now().isoformat()
+            for task in tasks:
+                task_id, desc, scheduled_for, created = task
+                if scheduled_for and scheduled_for <= now_iso:
+                    # Update status first so it doesn't fire multiple times
+                    db.update_task_status(task_id, 'completed')
+                    # Show native Windows popup (0x40 = Info icon, 0x40000 = Topmost)
+                    ctypes.windll.user32.MessageBoxW(0, f"Reminder:\n\n{desc}", "Ultron Alert", 0x40 | 0x40000)
+        except Exception:
+            pass
+        time.sleep(15) # Check every 15 seconds
 
 # Ensure we can import from the ultron package
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +39,10 @@ def main():
     try:
         # Initialize Brain (this will check for API key and set up Gemini)
         brain = Brain()
+        
+        # Start the background reminder thread
+        reminder_thread = threading.Thread(target=reminder_worker, args=(brain.db,), daemon=True)
+        reminder_thread.start()
     except ValueError as e:
         print(f"\n[ERROR] {e}")
         print("Please open the '.env' file and add your GEMINI_API_KEY.")
@@ -64,10 +87,15 @@ def main():
             msg = random.choice(LOADING_MESSAGES)
             done = False
             
+            # Print the prefix exactly once
+            sys.stdout.write(f"\rUltron: {msg}  ")
+            sys.stdout.flush()
+            
             def spin():
                 spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
                 while not done:
-                    sys.stdout.write(f"\rUltron: {msg} {next(spinner)}")
+                    # Backspace 1 char to overwrite just the spinner
+                    sys.stdout.write(f"\b{next(spinner)}")
                     sys.stdout.flush()
                     time.sleep(0.1)
                     
@@ -79,8 +107,10 @@ def main():
             finally:
                 done = True
                 spinner_thread.join()
-                sys.stdout.write('\r' + ' ' * (len(msg) + 20) + '\r') # Clear the line
-                
+                # Safely clear the line using backspaces instead of \r
+                clear_len = len(msg) + 12
+                sys.stdout.write('\b' * clear_len + ' ' * clear_len + '\b' * clear_len)
+                sys.stdout.flush()
             print(f"Ultron: {response}")
             
         except KeyboardInterrupt:
@@ -88,6 +118,13 @@ def main():
             break
         except Exception as e:
             print(f"\n[An error occurred]: {e}")
+
+    # Ensure Playwright browser cleans up cleanly so Node.js doesn't throw EPIPE
+    try:
+        if 'brain' in locals() and hasattr(brain, 'browser') and brain.browser:
+            brain.browser.close()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()

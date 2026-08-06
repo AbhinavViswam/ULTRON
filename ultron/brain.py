@@ -3,7 +3,7 @@ import uuid
 from google import genai
 from google.genai import types
 from ultron.database import Database
-from ultron.automation import open_application, BrowserManager
+from ultron.automation import open_application, close_application, system_media_control, search_spotify, BrowserManager
 
 class Brain:
     def __init__(self):
@@ -25,8 +25,8 @@ class Brain:
         available = [m.name for m in self.client.models.list()]
         
         preferred = [
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
+            # "gemini-3.6-flash",
+            "gemma-4-31b",
             "gemini-3.0-flash",
         ]
         
@@ -52,6 +52,15 @@ class Brain:
             """
             self.db.save_memory(category, key, value, importance)
             return "Memory saved successfully."
+
+        def set_reminder(description: str, scheduled_for: str) -> str:
+            """Sets a reminder for a specific time in the future.
+            Args:
+                description: The reminder message.
+                scheduled_for: The time to remind the user, in ISO 8601 format (e.g., '2026-08-06T10:30:00').
+            """
+            self.db.add_task(description, scheduled_for)
+            return f"Reminder successfully set for {scheduled_for}."
 
         def search_memories(query: str) -> str:
             """Searches for relevant memories. Call this when you need to recall a fact about the user.
@@ -104,21 +113,30 @@ class Brain:
             """Closes the browser session."""
             return self.browser.close()
         # Define the system instruction for the Ultron persona
-        sys_instruct = (
-            "You are Ultron, an advanced, highly intelligent, and helpful desktop assistant. "
-            "You provide concise, accurate, and professional answers. "
-            "You have access to a long-term Memory Engine. If the user asks you to remember something, "
-            "use the save_memory tool. If the user asks you a question that requires recalling past facts, "
-            "preferences, or details, proactively use the search_memories tool to retrieve the information before answering. "
-            "If the user asks to continue a past conversation or references a previous chat (e.g., 'our Docker chat'), "
-            "use the search_past_conversations tool to fetch the relevant context before responding. "
-            "You also have system automation capabilities: "
-            "1. If the user asks you to open an application (e.g., 'open chrome', 'launch vscode'), use the open_application tool. "
-            "2. If the user asks you to search the web, visit a webpage, or find information online, use the browser_navigate tool. "
-            "3. Once on a webpage, you can interact with it! Use browser_click to click links/buttons, browser_type_text to fill out forms/search bars, browser_press_key to hit Enter, browser_scroll to view more, and browser_go_back to return. "
-            "4. If you need to answer a question based on the webpage, use the browser_read_page tool to extract its text. "
-            "5. If the user explicitly asks you to close the browser, use the browser_close tool."
-        )
+        sys_instruct = """You are Ultron, an advanced, highly intelligent desktop AI assistant.
+
+# CORE RULES
+- Provide concise, accurate, and professional answers.
+- You DO NOT know any personal details about the user by default. You MUST use your memory tools to find out.
+
+# MEMORY ENGINE (CRITICAL)
+- TO REMEMBER: If the user tells you a fact, preference, or detail to remember, use `save_memory`.
+- TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database.
+- TO RECALL CHATS: If the user references a past conversation, use `search_past_conversations`.
+- REMINDERS: If the user asks to be reminded of something at a specific time (e.g., "remind me in 10 minutes", "remind me tomorrow at 10 AM"), use the `set_reminder` tool with the calculated ISO 8601 timestamp. DO NOT use `save_memory` for time-based reminders.
+
+# BROWSER AUTOMATION
+You have full interactive control over a web browser.
+- Navigating: Use `browser_navigate` to search Google or go to a URL.
+- Reading: Use `browser_read_page` to extract the text of the current page to answer questions.
+- Interacting: Use `browser_click`, `browser_type_text`, `browser_press_key`, `browser_scroll`, and `browser_go_back` to drive the page like a human.
+- Closing: Use `browser_close` when instructed.
+
+# SYSTEM AUTOMATION
+- Use `open_application` to launch local desktop apps (like chrome, vscode, spotify).
+- Use `close_application` to close local desktop apps when the user asks to close or quit them.
+- TO CONTROL MUSIC: You MUST use `system_media_control` with action 'play', 'pause', 'next', or 'prev'. If the user says "play music", call this tool immediately with 'play'. NEVER tell the user to do it themselves!
+- TO SEARCH MUSIC: If the user asks to play or search for a specific artist or song (e.g., "play Justin Bieber", "find lofi beats"), use the `search_spotify` tool to open it directly in the Spotify app."""
         
         # Start a chat session with the system instruction and tools
         self.chat = self.client.chats.create(
@@ -126,8 +144,8 @@ class Brain:
             config=types.GenerateContentConfig(
                 system_instruction=sys_instruct,
                 tools=[
-                    save_memory, search_memories, search_past_conversations,
-                    open_application, browser_navigate, browser_read_page, browser_close,
+                    save_memory, search_memories, search_past_conversations, set_reminder,
+                    open_application, close_application, system_media_control, search_spotify, browser_navigate, browser_read_page, browser_close,
                     browser_click, browser_type_text, browser_press_key, browser_go_back, browser_scroll
                 ]
             )
@@ -148,4 +166,8 @@ class Brain:
             
             return response.text
         except Exception as e:
+            error_str = str(e).lower()
+            # 429 is the HTTP status code for "Too Many Requests" / Quota Exceeded
+            if "429" in error_str or "quota" in error_str or "exhausted" in error_str:
+                return "I've hit my API rate limit. Please wait about 60 seconds before sending another request!"
             return f"Error communicating with brain: {e}"

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import ctypes
 from playwright.sync_api import sync_playwright
 
 # Safe list of allowed applications
@@ -12,11 +13,25 @@ ALLOWED_APPS = {
     "explorer": "explorer",
     "edge": "start msedge",
     "spotify": "start spotify",
-    "whatsapp": "start whatsapp",
+    "whatsapp": "explorer.exe whatsapp:",
     "antigravity": "start antigravity",
     "docker": "start docker",
     "pg admin": "start pgadmin4",
     "minecraft": "start minecraft"
+}
+
+# Maps allowed apps to their executable process names for closing
+APP_PROCESS_NAMES = {
+    "chrome": "chrome.exe",
+    "vscode": "code.exe",
+    "notepad": "notepad.exe",
+    "calculator": "CalculatorApp.exe", 
+    "edge": "msedge.exe",
+    "spotify": "spotify.exe",
+    "whatsapp": "WhatsApp.Root.exe",
+    "docker": "Docker Desktop.exe",
+    "pg admin": "pgadmin4.exe",
+    "minecraft": "Minecraft.exe"
 }
 
 def open_application(app_name: str) -> str:
@@ -43,6 +58,96 @@ def open_application(app_name: str) -> str:
     except Exception as e:
         return f"Failed to launch {app_name}. Error: {e}"
 
+def close_application(app_name: str) -> str:
+    """Closes a safe, predefined desktop application.
+    Args:
+        app_name: The name of the application (e.g., 'spotify', 'whatsapp').
+    """
+    app_key = app_name.lower().strip()
+    
+    # Try to find a match in our allowed list
+    found_key = None
+    for key in ALLOWED_APPS.keys():
+        if key in app_key:
+            found_key = key
+            break
+            
+    if not found_key:
+        return f"Cannot close '{app_name}'. It is not in the safe list of allowed applications."
+        
+    process_name = APP_PROCESS_NAMES.get(found_key)
+    if not process_name:
+        # Fallback to key.exe if not explicitly mapped
+        process_name = f"{found_key}.exe"
+        
+    try:
+        # Prevent killing Windows Explorer by accident
+        if found_key == "explorer":
+            return "Closing Windows Explorer is not permitted for safety reasons."
+            
+        # /F forces termination, /IM specifies image name, /T kills child processes too
+        subprocess.check_output(f'taskkill /F /IM "{process_name}" /T', shell=True, stderr=subprocess.STDOUT)
+        return f"Successfully closed {app_name}."
+    except subprocess.CalledProcessError as e:
+        output = e.output.decode('utf-8', errors='ignore') if e.output else str(e)
+        return f"Failed to close {app_name}. It might already be closed. Details: {output}"
+    except Exception as e:
+        return f"Failed to close {app_name}. Error: {e}"
+
+def search_spotify(query: str) -> str:
+    """Searches Spotify for an artist, song, or album and opens it in the desktop app.
+    Args:
+        query: The search term (e.g., 'Justin Bieber', 'lofi beats').
+    """
+    try:
+        import urllib.parse
+        query_encoded = urllib.parse.quote(query)
+        # Construct the official Spotify URI for searching
+        command = f'start spotify:search:{query_encoded}'
+        subprocess.Popen(command, shell=True)
+        return f"Successfully opened Spotify and searched for '{query}'."
+    except Exception as e:
+        return f"Failed to search Spotify. Error: {e}"
+
+def system_media_control(action: str) -> str:
+    """Controls global system media (play, pause, next, previous).
+    Args:
+        action: One of 'play', 'pause', 'next', 'prev'
+    """
+    VK_MEDIA_NEXT_TRACK = 0xB0
+    VK_MEDIA_PREV_TRACK = 0xB1
+    VK_MEDIA_PLAY_PAUSE = 0xB3
+    
+    action = action.lower()
+    
+    try:
+        if action in ["play", "pause", "toggle"]:
+            try:
+                import time
+                # If Spotify is closed, pressing play won't do anything, so we open it first.
+                output = subprocess.check_output('tasklist /FI "IMAGENAME eq spotify.exe"', shell=True).decode()
+                if "spotify.exe" not in output.lower():
+                    open_application("spotify")
+                    time.sleep(5)  # Give Spotify a few seconds to load
+            except Exception:
+                pass
+                
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 2, 0)
+            return "Toggled play/pause."
+        elif action in ["next", "skip"]:
+            ctypes.windll.user32.keybd_event(VK_MEDIA_NEXT_TRACK, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_NEXT_TRACK, 0, 2, 0)
+            return "Skipped to next track."
+        elif action in ["prev", "previous", "back"]:
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PREV_TRACK, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PREV_TRACK, 0, 2, 0)
+            return "Went to previous track."
+        else:
+            return f"Unknown media action: {action}"
+    except Exception as e:
+        return f"Failed to control media: {e}"
+
 class BrowserManager:
     """Manages a persistent Playwright browser session."""
     def __init__(self):
@@ -54,7 +159,7 @@ class BrowserManager:
         """Starts the browser if it isn't already running."""
         if not self.playwright:
             self.playwright = sync_playwright().start()
-            # Launch in headed mode as requested by user
+            # Launch an isolated, temporary browser session (not using personal profile)
             self.browser = self.playwright.chromium.launch(headless=False)
             self.page = self.browser.new_page()
 

@@ -92,6 +92,16 @@ class Database:
             ''')
             return cursor.fetchall()
             
+    def update_task_status(self, task_id: int, status: str):
+        """Update the status of a specific task (e.g., 'completed')."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE tasks 
+                SET status = ? 
+                WHERE id = ?
+            ''', (status, task_id))
+            conn.commit()
     def save_memory(self, category: str, key: str, value: str, importance: int):
         """Save a new memory to the database."""
         with sqlite3.connect(self.db_path) as conn:
