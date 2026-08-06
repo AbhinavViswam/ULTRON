@@ -102,6 +102,16 @@ class Database:
                 WHERE id = ?
             ''', (status, task_id))
             conn.commit()
+
+    def delete_task(self, task_id: int):
+        """Delete a task from the database completely."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM tasks 
+                WHERE id = ?
+            ''', (task_id,))
+            conn.commit()
     def save_memory(self, category: str, key: str, value: str, importance: int):
         """Save a new memory to the database."""
         with sqlite3.connect(self.db_path) as conn:
@@ -112,18 +122,39 @@ class Database:
             ''', (category, key, value, importance))
             conn.commit()
             
-    def search_memories(self, query: str):
-        """Search memories using a basic LIKE query."""
+    def search_memories(self, query: str = ""):
+        """Search memories using smart keyword matching, or return all top memories as fallback."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            search_term = f"%{query}%"
-            cursor.execute('''
-                SELECT category, key, value, importance, created_at 
-                FROM memories 
-                WHERE key LIKE ? OR value LIKE ?
-                ORDER BY importance DESC
-            ''', (search_term, search_term))
-            return cursor.fetchall()
+            
+            if not query or len(query.strip()) == 0:
+                cursor.execute('SELECT category, key, value, importance FROM memories ORDER BY importance DESC LIMIT 15')
+                return cursor.fetchall()
+                
+            stop_words = {"who", "what", "where", "is", "my", "am", "i", "the", "a", "an", "user", "identity", "me", "tell", "details"}
+            words = [w.strip() for w in query.lower().split() if w.strip() not in stop_words and len(w.strip()) > 1]
+            
+            if not words:
+                cursor.execute('SELECT category, key, value, importance FROM memories ORDER BY importance DESC LIMIT 15')
+                return cursor.fetchall()
+                
+            where_clauses = []
+            params = []
+            for word in words:
+                where_clauses.append("(LOWER(key) LIKE ? OR LOWER(value) LIKE ? OR LOWER(category) LIKE ?)")
+                term = f"%{word}%"
+                params.extend([term, term, term])
+                
+            sql = f"SELECT category, key, value, importance FROM memories WHERE {' OR '.join(where_clauses)} ORDER BY importance DESC LIMIT 15"
+            cursor.execute(sql, params)
+            results = cursor.fetchall()
+            
+            # Fallback: if no specific match, return top memories so AI has context
+            if not results:
+                cursor.execute('SELECT category, key, value, importance FROM memories ORDER BY importance DESC LIMIT 15')
+                results = cursor.fetchall()
+                
+            return results
             
     def search_chat_history(self, query: str, limit: int = 3):
         """Search past conversations in chat history using a basic LIKE query."""

@@ -1,4 +1,15 @@
-google-genai
+openai
 python-dotenv
 duckduckgo-search
 playwright
+pyautogui
+edge-tts
+SpeechRecognition
+sounddevice
+numpy
+Pillow
+psutil
+pywinauto
+pyperclip
+
+
