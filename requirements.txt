@@ -3,7 +3,7 @@ python-dotenv
 duckduckgo-search
 playwright
 pyautogui
-edge-tts
+piper-tts
 SpeechRecognition
 sounddevice
 numpy
@@ -11,5 +11,7 @@ Pillow
 psutil
 pywinauto
 pyperclip
-
-
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+docker

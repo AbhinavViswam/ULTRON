@@ -13,6 +13,11 @@ from ultron.automation import (
     get_system_health, write_in_notepad, send_whatsapp_message,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control
 )
+from ultron.gmail_plugin import read_emails, send_email, draft_email
+from ultron.docker_plugin import (
+    docker_list_containers, docker_list_images, docker_start_container,
+    docker_stop_container, docker_remove_container, docker_run_image, docker_start_daemon
+)
 
 class ToolBridge:
     """Helper to convert Python functions to OpenAI JSON schemas."""
@@ -155,7 +160,17 @@ class Brain:
             "copy_to_clipboard": copy_to_clipboard,
             "find_files": find_files,
             "read_file_content": read_file_content,
-            "system_power_control": system_power_control
+            "system_power_control": system_power_control,
+            "read_emails": read_emails,
+            "send_email": send_email,
+            "draft_email": draft_email,
+            "docker_list_containers": docker_list_containers,
+            "docker_list_images": docker_list_images,
+            "docker_start_container": docker_start_container,
+            "docker_stop_container": docker_stop_container,
+            "docker_remove_container": docker_remove_container,
+            "docker_run_image": docker_run_image,
+            "docker_start_daemon": docker_start_daemon
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -196,7 +211,9 @@ You have full interactive control over a web browser.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
 - FILE SEARCH & READ: Use `find_files` to locate files on Desktop/Downloads and `read_file_content` to read text files.
-- POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown."""
+- POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
+- GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
+- DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images."""
         
         # Initialize conversation history with OpenRouter format
         self.messages = [{"role": "system", "content": sys_instruct}]
@@ -240,13 +257,22 @@ You have full interactive control over a web browser.
             # Append user message
             self.messages.append({"role": "user", "content": user_text})
             
-            # Initial API call
-            response = self.client.chat.completions.create(
-                model=self.selected_model,
-                messages=self.messages,
-                tools=self.tools_schema,
-                tool_choice="auto"
-            )
+            # Initial API call with retries
+            for attempt in range(3):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.selected_model,
+                        messages=self.messages,
+                        tools=self.tools_schema,
+                        tool_choice="auto"
+                    )
+                    if response and response.choices:
+                        break
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    import time
+                    time.sleep(2)
             
             if not response or not response.choices:
                 return "The OpenRouter model server returned an empty response. Please try again in a few seconds!"
@@ -284,13 +310,22 @@ You have full interactive control over a web browser.
                         "content": str(function_response),
                     })
                 
-                # Call the model again with the newly added tool results
-                response = self.client.chat.completions.create(
-                    model=self.selected_model,
-                    messages=self.messages,
-                    tools=self.tools_schema,
-                    tool_choice="auto"
-                )
+                # Call the model again with the newly added tool results (with retries)
+                for attempt in range(3):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.selected_model,
+                            messages=self.messages,
+                            tools=self.tools_schema,
+                            tool_choice="auto"
+                        )
+                        if response and response.choices:
+                            break
+                    except Exception as e:
+                        if attempt == 2:
+                            raise e
+                        import time
+                        time.sleep(2)
                 
                 if not response or not response.choices:
                     return "The OpenRouter model server returned an empty response during tool execution."

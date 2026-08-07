@@ -6,16 +6,15 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 
 ## 🧠 Core AI & Voice Architecture
 
-### 1. Dual AI Engine (OpenRouter & NVIDIA NIM API)
-- **OpenRouter & NVIDIA NIM Integration:** Dynamically connects to OpenRouter (`openrouter.ai/api/v1`) or NVIDIA NIM API (`integrate.api.nvidia.com/v1`).
-- **Auto-Provider Detection:** Automatically routes requests based on API key prefix (`nvapi-` vs `sk-or-v1-`).
-- **Models Supported:** `nvidia/nemotron-3-ultra-550b-a55b:free`, `meta/llama-3.3-70b-instruct`, `deepseek-ai/deepseek-r1`.
+### 1. AI Engine (OpenRouter)
+- **OpenRouter Integration:** Connects exclusively to OpenRouter (`openrouter.ai/api/v1`).
+- **Models Supported:** `nvidia/nemotron-3-ultra-550b-a55b:free` (Configurable via `brain.py`).
 - **Dynamic Tool Bridge (`ToolBridge`):** Converts Python function signatures dynamically into OpenAI-compliant JSON tool schemas via `inspect.signature`.
 
-### 2. Microsoft Edge Neural Voice Engine (`VoiceSpeaker`)
-- **Human-Feel Neural TTS:** Powered by Microsoft Edge AI Speech (`edge-tts`) using the `en-US-ChristopherNeural` American male voice.
-- **Amplified Output:** Boosted by `+50%` volume for maximum audio clarity.
-- **Zero-Dependency Playback:** Native Windows `System.Windows.Media.MediaPlayer` invocation via PowerShell bypasses C++ build tools.
+### 2. Offline Piper Neural Voice Engine (`VoiceSpeaker`)
+- **Fully Offline TTS:** Powered by Piper TTS, running entirely on your local CPU for maximum privacy and zero latency.
+- **Custom Neural Voices:** Uses the high-quality `en_US-bryce-medium` voice by default. Automatically downloads models to `resources/voices/` on first run.
+- **Instant Streaming Playback:** Bypasses file generation and streams raw PCM audio chunks directly to your speakers using `sounddevice` for near-instant (0.25s) voice response.
 - **Text Sanitization:** Automatically strips markdown symbols (`**`), code blocks, URLs, and emojis before speaking.
 
 ### 3. Continuous Background Voice Listener (`VoiceListener`)
@@ -65,20 +64,25 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 - **Text File Reader:** Reads content from `.txt`, `.md`, `.py`, `.json`, or `.csv` files.
 
 ### 6. System Power Controls (`system_power_control`)
-- **Power Actions:** Lock workstation (`LockWorkStation`), put PC to sleep (`SetSuspendState`), or schedule system shutdown.
+- **Power Actions:** Lock workstation (`LockWorkStation`), put PC to sleep (`SetSuspendState`), schedule system shutdown, or cancel a scheduled shutdown.
 
-### 7. Desktop Screenshots (`take_screenshot`)
+### 7. Docker Container Management (`docker_plugin`)
+- **Lifecycle Control:** Start, stop, and forcefully remove containers by name or ID.
+- **Run & Inspect:** Run new containers in the background from local images, list all downloaded images with their sizes, and list running/stopped containers with their status.
+
+### 8. Desktop Screenshots (`take_screenshot`)
 - **Triple-Layer Capture Engine:** 
   1. PIL `ImageGrab.grab(all_screens=True)`
   2. PyAutoGUI `screenshot()`
   3. Native Windows PowerShell `.NET System.Drawing` Graphics capture.
 - Saves captures to `screenshots/` directory.
 
-### 8. System Media & Volume Controls (`system_media_control`, `adjust_volume`)
-- Controls global Windows media (Play, Pause, Skip, Previous).
-- Adjusts system volume (Volume Up, Volume Down, Mute).
+### 9. System Media & Volume Controls (`system_media_control`, `adjust_volume`, `search_spotify`)
+- **Global Media Controls:** Controls global Windows media (Play, Pause, Skip, Previous).
+- **Volume Controls:** Adjusts system volume (Volume Up, Volume Down, Mute).
+- **Spotify Integration:** Searches Spotify for an artist, song, or album and opens it directly in the desktop app.
 
-### 9. Interactive Playwright Web Browser (`BrowserManager`)
+### 10. Interactive Playwright Web Browser (`BrowserManager`)
 - Navigates web pages, searches Google, reads page text, clicks buttons, types text, scrolls, and navigates history in an isolated Playwright Chromium instance.
 
 ---

@@ -100,7 +100,7 @@ def main():
     try:
         # Initialize Brain, Voice Speaker, and Background Voice Listener
         brain = Brain()
-        speaker = VoiceSpeaker(voice="en-US-ChristopherNeural")
+        speaker = VoiceSpeaker(voice_name="en_US-bryce-medium")
         
         command_queue = queue.Queue()
 

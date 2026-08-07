@@ -1,19 +1,29 @@
 import os
 import re
 import time
-import asyncio
 import threading
-import tempfile
-import subprocess
-import edge_tts
+import urllib.request
+import sounddevice as sd
+
+try:
+    from piper.voice import PiperVoice
+except ImportError:
+    PiperVoice = None
 
 class VoiceSpeaker:
-    """Provides hyper-realistic human voice output using Microsoft Edge Neural TTS."""
-    def __init__(self, voice: str = "en-US-ChristopherNeural"):
-        self.voice = voice
+    """Provides human-like voice output using the offline Piper Neural TTS engine with instant audio streaming."""
+    def __init__(self, voice_name: str = "en_US-bryce-medium"):
+        self.voice_name = voice_name
         self.enabled = True
-        self.current_process = None
-        self.should_stop = False
+        self.speech_id = 0
+        self.piper_voice = None
+        
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.voices_dir = os.path.join(self.base_dir, "resources", "voices")
+        os.makedirs(self.voices_dir, exist_ok=True)
+        
+        self.onnx_path = os.path.join(self.voices_dir, f"{self.voice_name}.onnx")
+        self.json_path = os.path.join(self.voices_dir, f"{self.voice_name}.onnx.json")
 
     def _clean_text_for_speech(self, text: str) -> str:
         """Strips markdown formatting, URLs, code snippets, and emojis for clean natural speech."""
@@ -35,85 +45,84 @@ class VoiceSpeaker:
 
     def stop(self):
         """Immediately interrupts and stops any active speech playback."""
-        self.should_stop = True
-        if self.current_process:
-            try:
-                self.current_process.kill()
-            except Exception:
-                pass
-            self.current_process = None
+        self.speech_id += 1
 
-    def _play_audio_windows(self, file_path: str):
-        """Plays MP3 natively on Windows using PowerShell MediaPlayer with instant interruption support."""
-        try:
-            abs_path = os.path.abspath(file_path).replace("'", "''")
-            ps_command = (
-                f"Add-Type -AssemblyName presentationCore; "
-                f"$player = New-Object System.Windows.Media.MediaPlayer; "
-                f"$player.Open('{abs_path}'); "
-                f"$player.Volume = 1.0; "
-                f"$player.Play(); "
-                f"while ($player.NaturalDuration.HasTimeSpan -eq $false) {{ Start-Sleep -Milliseconds 50 }}; "
-                f"while ($player.Position -lt $player.NaturalDuration.TimeSpan) {{ Start-Sleep -Milliseconds 100 }}; "
-                f"$player.Close()"
-            )
-            self.current_process = subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_command],
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+    def _ensure_model_downloaded(self):
+        """Downloads the Piper voice model and config if they don't exist."""
+        if not os.path.exists(self.onnx_path) or not os.path.exists(self.json_path):
+            print(f"\n[Voice Engine] First run detected. Downloading offline voice model '{self.voice_name}'...")
             
-            # Poll process until finished or interrupted
-            while self.current_process and self.current_process.poll() is None:
-                if self.should_stop:
-                    try:
-                        self.current_process.kill()
-                    except Exception:
-                        pass
-                    break
-                time.sleep(0.05)
+            parts = self.voice_name.split('-')
+            if len(parts) >= 3:
+                locale = parts[0]
+                lang = locale.split('_')[0]
+                name = parts[1]
+                quality = parts[2]
                 
-            self.current_process = None
-        except Exception:
-            pass
+                base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang}/{locale}/{name}/{quality}/{self.voice_name}"
+                
+                try:
+                    urllib.request.urlretrieve(base_url + ".onnx", self.onnx_path)
+                    urllib.request.urlretrieve(base_url + ".onnx.json", self.json_path)
+                    print(f"[Voice Engine] Voice model '{self.voice_name}' downloaded successfully to resources/voices/.")
+                except Exception as e:
+                    print(f"[Voice Engine Error] Failed to download voice model: {e}")
+            else:
+                print(f"[Voice Engine Error] Invalid voice name format: {self.voice_name}")
 
-    async def _async_speak(self, text: str):
+    def _load_voice(self):
+        if not PiperVoice:
+            print("[Voice Engine Error] piper-tts is not installed. Please run: pip install piper-tts")
+            return False
+            
+        if not self.piper_voice:
+            self._ensure_model_downloaded()
+            if os.path.exists(self.onnx_path) and os.path.exists(self.json_path):
+                self.piper_voice = PiperVoice.load(self.onnx_path, config_path=self.json_path)
+            else:
+                return False
+        return True
+
+    def _speak_sync(self, text: str, my_id: int):
         clean_text = self._clean_text_for_speech(text)
-        if not clean_text or not self.enabled or self.should_stop:
+        if not clean_text or not self.enabled or self.speech_id != my_id:
             return
 
+        if not self._load_voice():
+            return
+
+        stream = None
         try:
-            temp_path = None
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-                temp_path = temp_file.name
-
-            # Boost volume output by +50% for maximum clarity
-            communicate = edge_tts.Communicate(clean_text, self.voice, volume="+50%")
-            await communicate.save(temp_path)
-
-            if not self.should_stop:
-                self._play_audio_windows(temp_path)
-
-            if temp_path and os.path.exists(temp_path):
+            stream = sd.RawOutputStream(samplerate=self.piper_voice.config.sample_rate, channels=1, dtype='int16')
+            stream.start()
+            
+            for audio_chunk in self.piper_voice.synthesize(clean_text):
+                if self.speech_id != my_id:
+                    break
+                stream.write(audio_chunk.audio_int16_bytes)
+            
+            if self.speech_id != my_id:
+                stream.abort() # instantly clear buffer on interrupt
+            else:
+                stream.stop()
+        except Exception as e:
+            pass
+        finally:
+            if stream:
                 try:
-                    os.remove(temp_path)
+                    stream.close()
                 except Exception:
                     pass
 
-        except Exception as e:
-            pass
-
-    def speak(self, text: str):
+    def speak(self, text: str, my_id: int = None):
         """Synchronous speech execution."""
-        try:
-            asyncio.run(self._async_speak(text))
-        except Exception:
-            pass
+        if my_id is None:
+            my_id = self.speech_id
+        self._speak_sync(text, my_id)
 
     def speak_async(self, text: str):
         """Asynchronous non-blocking speech execution in a background thread."""
-        self.stop()
-        self.should_stop = False
-        thread = threading.Thread(target=self.speak, args=(text,), daemon=True)
+        self.stop() # Increments speech_id, killing any old threads and aborting streams
+        current_id = self.speech_id
+        thread = threading.Thread(target=self.speak, args=(text, current_id), daemon=True)
         thread.start()
