@@ -4,7 +4,7 @@ import json
 import ctypes
 import threading
 import datetime
-from ultron.gmail_plugin import get_unread_emails_count
+from ultron.plugins.gmail_plugin import get_unread_emails_count
 
 class CronManager:
     """Manages scheduled background cron tasks for Ultron."""

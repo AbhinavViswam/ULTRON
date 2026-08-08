@@ -104,6 +104,7 @@ def main():
         brain = Brain()
         speaker = VoiceSpeaker(voice_name="en_US-bryce-medium")
         output_manager = OutputManager(speaker)
+        brain.output_manager = output_manager
         
         command_queue = queue.Queue()
 

@@ -293,19 +293,52 @@ class BrowserManager:
         self.page = None
 
     def start(self):
-        """Starts the browser if it isn't already running."""
+        """Starts the browser with a persistent user profile if it isn't already running."""
         if not self.playwright:
             self.playwright = sync_playwright().start()
-            # Launch an isolated, temporary browser session (not using personal profile)
-            self.browser = self.playwright.chromium.launch(headless=False)
-            self.page = self.browser.new_page()
+            
+            # Setup a persistent user data directory
+            import os
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            profile_dir = os.path.join(base_dir, "data", "browser_profile")
+            os.makedirs(profile_dir, exist_ok=True)
+            
+            # Launch persistent context to keep login sessions and avoid CAPTCHAs
+            self.browser = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                args=["--start-maximized", "--disable-blink-features=AutomationControlled"],
+                ignore_default_args=["--enable-automation"],
+                no_viewport=True
+            )
+            
+            # Hide webdriver fingerprint to bypass Google Login blocks
+            self.browser.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """)
+            
+            # Persistent context comes with a default page
+            if len(self.browser.pages) > 0:
+                self.page = self.browser.pages[0]
+            else:
+                self.page = self.browser.new_page()
 
     def navigate(self, query_or_url: str) -> str:
         """Navigates the browser to a URL or a Google search."""
         try:
             self.start()
-            if "." in query_or_url and " " not in query_or_url:
-                url = query_or_url if query_or_url.startswith("http") else f"https://{query_or_url}"
+            
+            is_url = False
+            if " " not in query_or_url:
+                if query_or_url.startswith("http://") or query_or_url.startswith("https://"):
+                    is_url = True
+                elif "localhost" in query_or_url or "." in query_or_url:
+                    is_url = True
+                    
+            if is_url:
+                url = query_or_url if query_or_url.startswith("http") else f"http://{query_or_url}"
             else:
                 url = f"https://www.google.com/search?q={query_or_url}"
                 
@@ -372,6 +405,107 @@ class BrowserManager:
         except Exception as e:
             return f"Failed to navigate back. Error: {e}"
             
+    def go_forward(self) -> str:
+        """Navigates forward to the next page in history."""
+        try:
+            if not self.page:
+                return "Browser is not open."
+            self.page.go_forward(timeout=5000)
+            return f"Navigated forward to: {self.page.title()}"
+        except Exception as e:
+            return f"Failed to navigate forward. Error: {e}"
+
+    def new_tab(self, url: str = None) -> str:
+        """Opens a new browser tab. If url is provided, navigates to it."""
+        try:
+            if not self.browser:
+                self.start()
+            self.page = self.browser.new_page()
+            if url:
+                if "." in url and " " not in url and not url.startswith("http"):
+                    url = f"https://{url}"
+                self.page.goto(url)
+                self.page.wait_for_load_state("domcontentloaded")
+            return f"Opened new tab. Active tabs: {len(self.browser.pages)}"
+        except Exception as e:
+            return f"Failed to open new tab. Error: {e}"
+
+    def switch_tab(self, index: int) -> str:
+        """Switches to the tab at the given index (0-based)."""
+        try:
+            if not self.browser:
+                return "Browser is not open."
+            pages = self.browser.pages
+            if index < 0 or index >= len(pages):
+                return f"Invalid tab index. You have {len(pages)} open tabs."
+            self.page = pages[index]
+            self.page.bring_to_front()
+            return f"Switched to tab {index}: {self.page.title()}"
+        except Exception as e:
+            return f"Failed to switch tab. Error: {e}"
+
+    def close_tab(self, index: int = None) -> str:
+        """Closes the tab at the given index, or the active tab if index is None."""
+        try:
+            if not self.browser:
+                return "Browser is not open."
+            pages = self.browser.pages
+            if not pages:
+                return "No tabs are open."
+                
+            if index is None:
+                self.page.close()
+                pages = self.browser.pages
+                if pages:
+                    self.page = pages[-1]
+                    self.page.bring_to_front()
+                else:
+                    self.page = None
+                return "Closed active tab."
+            
+            if index < 0 or index >= len(pages):
+                return f"Invalid tab index. You have {len(pages)} open tabs."
+                
+            closing_page = pages[index]
+            is_active = (closing_page == self.page)
+            closing_page.close()
+            
+            pages = self.browser.pages
+            if is_active and pages:
+                self.page = pages[-1]
+                self.page.bring_to_front()
+            elif not pages:
+                self.page = None
+                
+            return f"Closed tab {index}."
+        except Exception as e:
+            return f"Failed to close tab. Error: {e}"
+
+    def take_screenshot(self, filename: str = None) -> str:
+        """Takes a full page screenshot in the browser and saves it."""
+        try:
+            if not self.page:
+                return "Browser is not open."
+            
+            import os
+            import datetime
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            screenshots_dir = os.path.join(base_dir, "data", "screenshots")
+            os.makedirs(screenshots_dir, exist_ok=True)
+            
+            if not filename:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"browser_ss_{timestamp}.png"
+                
+            if not filename.endswith(".png"):
+                filename += ".png"
+                
+            filepath = os.path.join(screenshots_dir, filename)
+            self.page.screenshot(path=filepath, full_page=True)
+            return f"Browser screenshot saved to: {filepath}"
+        except Exception as e:
+            return f"Failed to take browser screenshot. Error: {e}"
+            
     def scroll(self, direction: str) -> str:
         """Scrolls the page 'up' or 'down'."""
         try:
@@ -403,6 +537,8 @@ class BrowserManager:
 
     def close(self) -> str:
         """Closes the browser session."""
+        if self.browser:
+            self.browser.close()
         if self.playwright:
             self.playwright.stop()
             self.playwright = None

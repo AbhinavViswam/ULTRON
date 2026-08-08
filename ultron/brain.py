@@ -14,10 +14,16 @@ from ultron.automation import (
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory
 )
-from ultron.gmail_plugin import read_emails, send_email, draft_email
-from ultron.docker_plugin import (
+from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
+from ultron.plugins.docker_plugin import (
     docker_list_containers, docker_list_images, docker_start_container,
     docker_stop_container, docker_remove_container, docker_run_image, docker_start_daemon
+)
+from ultron.plugins.research_plugin import (
+    web_search, research_read_url, save_research, list_research_reports, run_background_research_task
+)
+from ultron.plugins.workflow_plugin import (
+    create_workflow, run_workflow, list_workflows, delete_workflow
 )
 
 class ToolBridge:
@@ -168,6 +174,48 @@ class Brain:
             """Closes the browser session."""
             return self.browser.close()
             
+        def browser_go_forward() -> str:
+            """Navigates forward to the next page in history."""
+            return self.browser.go_forward()
+            
+        def browser_new_tab(url: str = None) -> str:
+            """Opens a new browser tab. If url is provided, navigates to it."""
+            return self.browser.new_tab(url)
+            
+        def browser_switch_tab(index: int) -> str:
+            """Switches to the tab at the given index (0-based)."""
+            return self.browser.switch_tab(index)
+            
+        def browser_close_tab(index: int = None) -> str:
+            """Closes the tab at the given index, or the active tab if index is None."""
+            return self.browser.close_tab(index)
+            
+        def browser_take_screenshot(filename: str = None) -> str:
+            """Takes a full page screenshot in the browser and saves it."""
+            return self.browser.take_screenshot(filename)
+            
+        def start_background_research(topic: str) -> str:
+            """Starts an asynchronous background research task on a topic.
+            Use this when the user asks to research, investigate, or look into a technology or topic.
+            Args:
+                topic: The research topic or question to investigate.
+            """
+            om = getattr(self, "output_manager", None)
+            return run_background_research_task(
+                topic=topic,
+                client=self.client,
+                model=self.selected_model,
+                output_manager=om
+            )
+
+        def run_workflow_tool(name: str) -> str:
+            """Runs a saved workflow by name. Executes all steps of the workflow sequentially.
+            Use this when the user asks to 'start', 'run', or 'execute' a saved workflow.
+            Args:
+                name: The name of the workflow to run.
+            """
+            return run_workflow(name, tool_functions=self.tool_functions)
+
         # Register all tools in a dictionary
         self.tool_functions = {
             "save_memory": save_memory,
@@ -186,6 +234,11 @@ class Brain:
             "browser_type_text": browser_type_text,
             "browser_press_key": browser_press_key,
             "browser_go_back": browser_go_back,
+            "browser_go_forward": browser_go_forward,
+            "browser_new_tab": browser_new_tab,
+            "browser_switch_tab": browser_switch_tab,
+            "browser_close_tab": browser_close_tab,
+            "browser_take_screenshot": browser_take_screenshot,
             "browser_scroll": browser_scroll,
             "browser_close": browser_close,
             "get_system_health": get_system_health,
@@ -210,7 +263,16 @@ class Brain:
             "docker_stop_container": docker_stop_container,
             "docker_remove_container": docker_remove_container,
             "docker_run_image": docker_run_image,
-            "docker_start_daemon": docker_start_daemon
+            "docker_start_daemon": docker_start_daemon,
+            "web_search": web_search,
+            "research_read_url": research_read_url,
+            "save_research": save_research,
+            "list_research_reports": list_research_reports,
+            "start_background_research": start_background_research,
+            "create_workflow": create_workflow,
+            "run_workflow": run_workflow_tool,
+            "list_workflows": list_workflows,
+            "delete_workflow": delete_workflow
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -235,9 +297,10 @@ CURRENT SYSTEM TIME: {now_str}
 # BROWSER AUTOMATION
 You have full interactive control over a web browser.
 - Navigating: Use `browser_navigate` to search Google or go to a URL.
-- Reading: Use `browser_read_page` to extract the text of the current page to answer questions.
-- Interacting: Use `browser_click`, `browser_type_text`, `browser_press_key`, `browser_scroll`, and `browser_go_back` to drive the page like a human.
-- Closing: Use `browser_close` when instructed.
+- Tabs: Use `browser_new_tab`, `browser_switch_tab`, and `browser_close_tab` for multi-tasking.
+- Interacting: Use `browser_click`, `browser_type_text`, `browser_press_key`, `browser_scroll`, `browser_go_back`, and `browser_go_forward` to drive the page.
+- Extracting: Use `browser_read_page` to extract text from the current page, and `browser_take_screenshot` to capture it visually.
+- Closing: Use `browser_close` to close the whole browser when instructed.
 
 # SYSTEM AUTOMATION & TOOLS
 - Use `open_application` to launch local desktop apps.
@@ -255,7 +318,23 @@ You have full interactive control over a web browser.
 - DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
 - GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
-- DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images."""
+- DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images.
+
+# RESEARCH PLUGIN (Background Pipeline)
+When the user asks you to research a topic, investigate something, or look into a technology (e.g., "Research whether Next.js 17 is worth upgrading to"):
+1. Call `start_background_research` with the research topic string.
+2. Inform the user respectfully that you have initiated background research and will notify them once it's saved.
+3. DO NOT read out the full research report out loud! The background process will notify the user with a short message when the .md file is saved to data/research.
+4. If the user asks to view or list previously saved research reports, call `list_research_reports`.
+
+# WORKFLOW ENGINE
+- CREATE: When the user wants to save a repeatable sequence of actions as a workflow, use `create_workflow`.
+  Parse the user's natural language steps into a JSON array of step strings.
+  Each step format: "tool_name arg1" (e.g., "open_application vscode", "browser_navigate localhost:3000", "docker_start_daemon").
+  For multi-arg tools, separate arguments with a pipe '|' character (e.g., "browser_type_text Search|React Server Components").
+- RUN: When the user asks to "start", "run", or "execute" a workflow by name, use `run_workflow`.
+- LIST: When the user asks to see or show their workflows, use `list_workflows`.
+- DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`."""
         
         # Initialize conversation history
         self.messages = [{"role": "system", "content": sys_instruct}]

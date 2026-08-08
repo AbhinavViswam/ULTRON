@@ -17,7 +17,7 @@ SCOPES = [
 def authenticate_gmail():
     """Authenticates the user using credentials.json and returns a Gmail API service instance."""
     creds = None
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     token_path = os.path.join(base_dir, 'token.json')
     creds_path = os.path.join(base_dir, 'credentials.json')
 

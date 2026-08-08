@@ -96,7 +96,10 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 - **Spotify Integration:** Searches Spotify for an artist, song, or album and opens it directly in the desktop app.
 
 ### 11. Interactive Playwright Web Browser (`BrowserManager`)
-- Navigates web pages, searches Google, reads page text, clicks buttons, types text, scrolls, and navigates history in an isolated Playwright Chromium instance.
+- **Full Navigation:** Navigates web pages, searches Google, goes back/forward in history, and scrolls.
+- **Multi-Tab Support:** Open new tabs, switch between active tabs, and close tabs dynamically (`new_tab`, `switch_tab`, `close_tab`).
+- **Interaction & Extraction:** Clicks elements, types text, presses keys, and reads full page text content.
+- **Visual Capture:** Takes full-page screenshots of the current browser tab and saves them to `data/screenshots/`.
 
 ### 12. Dynamic Configuration Engine (`settings.json`)
 - **Multi-API Provider Switch:** Dynamic switching between OpenRouter and Gemini API (`openrouterapi`, `geminiapi`).
@@ -112,6 +115,19 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 - **Configurable Recurring Tasks:** Configured under `"cron_jobs"` in `settings.json` with custom intervals (e.g. `3600` seconds for 1 hour).
 - **Unread Email Checker (`unread_emails_check`):** Periodically checks Gmail inbox for unread email count and displays native Windows notification popups when new emails arrive.
 - **Extensible Action Registry:** Register new cron jobs easily by adding action handlers into `CronManager.register_action(name, func)`.
+
+### 15. Background Research Engine (`research_plugin`)
+- **Asynchronous Execution:** Conducts multi-step deep web research in a non-blocking background thread while you continue chatting.
+- **Search & Scrape Pipeline:** Automatically queries DuckDuckGo (no API keys required), extracts top URLs, and fetches raw article texts by stripping out noise (ads/scripts/navbars).
+- **AI Synthesis:** Passes scraped web content to the LLM to generate a clean, highly structured Markdown report (Executive Summary, Key Findings, Pros & Cons, Recommendations, Sources).
+- **Silent File Output:** Saves final `.md` reports directly to `data/research/` and concisely notifies the user without reading the entire document out loud.
+
+### 16. Workflow Engine (`workflow_plugin`)
+- **One-Command Automation:** Save named multi-step action sequences (e.g., "RateUp Development Setup") and replay them with a single voice or text command.
+- **Flexible Step Format:** Each workflow step maps directly to an existing Ultron tool (e.g., `open_application vscode`, `browser_navigate localhost:3000`, `docker_start_daemon`).
+- **Fuzzy Name Matching:** Workflow names are matched case-insensitively with partial matching, so "start rateup" finds "RateUp Development Setup".
+- **Sequential Execution:** Steps run one-by-one with a 2-second delay between each to allow apps time to launch.
+- **Persistent Storage:** Workflows are saved to `data/workflows.json` and persist across sessions.
 
 ---
 
