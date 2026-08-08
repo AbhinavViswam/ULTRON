@@ -101,10 +101,11 @@ APP_PROCESS_NAMES = {
     "minecraft": "Minecraft.exe"
 }
 
-def open_application(app_name: str) -> str:
+def open_application(app_name: str, file_path: str = None) -> str:
     """Opens any desktop application (e.g. 'excel', 'settings', 'word', 'chrome', 'calculator').
     Args:
         app_name: The name of the application to launch.
+        file_path: Optional path to open with the application (e.g., 'C:/project' for vscode).
     """
     app_key = app_name.lower().strip()
     
@@ -119,9 +120,14 @@ def open_application(app_name: str) -> str:
     if not command:
         command = f"start {app_key}"
         
+    # Append the file path if provided
+    if file_path:
+        # Wrap in quotes in case there are spaces in the path
+        command = f'{command} "{file_path}"'
+        
     try:
         subprocess.Popen(command, shell=True)
-        return f"Successfully launched {app_name}."
+        return f"Successfully launched {app_name}{' with path ' + file_path if file_path else ''}."
     except Exception as e:
         return f"Failed to launch {app_name}. Error: {e}"
 
