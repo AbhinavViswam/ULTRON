@@ -7,6 +7,7 @@ import time
 import datetime
 import ctypes
 import queue
+import json
 from dotenv import load_dotenv
 
 def reminder_worker(db):
@@ -32,14 +33,16 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from ultron.brain import Brain
 from ultron.speaker import VoiceSpeaker
 from ultron.listener import VoiceListener
+from ultron.cron_manager import CronManager
+from ultron.output_manager import OutputManager
 
-def handle_user_query(user_text, brain, speaker):
+def handle_user_query(user_text, brain, output_manager):
     """Common handler for processing user queries from keyboard or microphone."""
     if not user_text or not user_text.strip():
         return
 
-    # Immediately stop speaking if Ultron is currently talking
-    speaker.stop()
+    # Immediately stop speaking and clear pending cron messages
+    output_manager.interrupt()
 
     # If Ultron is asleep and command is not a wake command, stay completely silent
     if brain.is_asleep:
@@ -66,7 +69,7 @@ def handle_user_query(user_text, brain, speaker):
     # Print and speak loading phrase
     sys.stdout.write(f"\rUltron: {msg}  ")
     sys.stdout.flush()
-    speaker.speak_async(msg)
+    output_manager.enqueue(msg, source="system", print_msg=False)
 
     def spin():
         spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
@@ -88,8 +91,7 @@ def handle_user_query(user_text, brain, speaker):
         sys.stdout.flush()
 
     if response:
-        print(f"\nUltron: {response}")
-        speaker.speak_async(response)
+        output_manager.enqueue(response, source="user")
 
 def main():
     print("Initializing Ultron Desktop Assistant...")
@@ -98,22 +100,39 @@ def main():
     load_dotenv()
     
     try:
-        # Initialize Brain, Voice Speaker, and Background Voice Listener
+        # Initialize Brain, Voice Speaker, and OutputManager
         brain = Brain()
         speaker = VoiceSpeaker(voice_name="en_US-bryce-medium")
+        output_manager = OutputManager(speaker)
         
         command_queue = queue.Queue()
 
-        # Callback function triggered when voice is detected by microphone
-        def on_voice_detected(spoken_text):
-            command_queue.put(('voice', spoken_text))
-            
-        listener = VoiceListener(callback_func=on_voice_detected)
-        listener.start_listening()
+        # Load Settings for microphone control
+        settings_path = os.path.join(os.path.dirname(__file__), "settings.json")
+        settings = {}
+        try:
+            with open(settings_path, "r") as f:
+                settings = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        mic_active = settings.get("microphone_active", True)
+
+        listener = None
+        if mic_active:
+            # Callback function triggered when voice is detected by microphone
+            def on_voice_detected(spoken_text):
+                command_queue.put(('voice', spoken_text))
+                
+            listener = VoiceListener(callback_func=on_voice_detected)
+            listener.start_listening()
 
         # Start the background reminder thread
         reminder_thread = threading.Thread(target=reminder_worker, args=(brain.db,), daemon=True)
         reminder_thread.start()
+
+        # Start the background Cron Manager (with output_manager for queued speech)
+        cron_manager = CronManager(brain=brain, output_manager=output_manager)
+        cron_manager.start()
 
         # Start background keyboard reader thread
         def keyboard_worker():
@@ -132,15 +151,17 @@ def main():
 
     except ValueError as e:
         print(f"\n[ERROR] {e}")
-        print("Please open the '.env' file and add your OpenRouter API_KEY.")
+        print("Please check your .env and settings.json files for correct API configuration.")
         sys.exit(1)
         
-    print("\nUltron is online. Continuous background microphone active. Type 'exit' or 'quit' to stop.")
+    if mic_active:
+        print("\nUltron is online. Continuous background microphone active. Type 'exit' or 'quit' to stop.")
+    else:
+        print("\nUltron is online. Background microphone is inactive (keyboard input only). Type 'exit' or 'quit' to stop.")
     print("-" * 50)
     
     welcome_msg = "Hello, welcome sir! How can I assist you today?"
-    print(f"\nUltron: {welcome_msg}")
-    speaker.speak_async(welcome_msg)
+    output_manager.enqueue(welcome_msg, source="system")
     
     while True:
         try:
@@ -157,7 +178,7 @@ def main():
                 sys.stdout.write(f"\rYou (Voice): {user_input}\n")
                 sys.stdout.flush()
             
-            handle_user_query(user_input, brain, speaker)
+            handle_user_query(user_input, brain, output_manager)
             
         except KeyboardInterrupt:
             print("\n\nUltron: Interrupted by user. Goodbye!")
@@ -171,6 +192,8 @@ def main():
             listener.stop()
         if 'brain' in locals() and hasattr(brain, 'browser') and brain.browser:
             brain.browser.close()
+        if 'output_manager' in locals():
+            output_manager.stop()
     except Exception:
         pass
 

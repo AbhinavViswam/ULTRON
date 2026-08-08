@@ -605,3 +605,111 @@ def system_power_control(action: str) -> str:
             return f"Unknown power action: {action}"
     except Exception as e:
         return f"Failed power action: {e}"
+
+def empty_recycle_bin(confirmed: bool = False) -> str:
+    """Empties the Windows Recycle Bin completely.
+    Args:
+        confirmed: Set to True ONLY if the user has explicitly confirmed (e.g., said 'yes', 'confirm', or 'proceed').
+    """
+    if not confirmed:
+        return "CONFIRMATION REQUIRED: Please ask the user for explicit confirmation before emptying the Recycle Bin."
+
+    try:
+        # SHERB_NOCONFIRMATION (0x1) | SHERB_NOPROGRESSUI (0x2) | SHERB_NOSOUND (0x4)
+        flags = 0x1 | 0x2 | 0x4
+        res = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, flags)
+        if res == 0:
+            return "Recycle Bin has been emptied successfully, sir."
+        else:
+            return f"Emptied Recycle Bin (result code: {res})."
+    except Exception as e:
+        return f"Failed to empty Recycle Bin: {e}"
+
+def clean_temp_files() -> str:
+    """Cleans temporary files and cache from the Windows %TEMP% folder to free up space."""
+    import tempfile
+    try:
+        temp_dir = tempfile.gettempdir()
+        deleted_count = 0
+        freed_bytes = 0
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    size = os.path.getsize(file_path)
+                    os.remove(file_path)
+                    deleted_count += 1
+                    freed_bytes += size
+                except Exception:
+                    pass
+        freed_mb = round(freed_bytes / (1024 * 1024), 2)
+        return f"Temporary files cleaned, sir. Removed {deleted_count} files ({freed_mb} MB freed)."
+    except Exception as e:
+        return f"Failed to clean temp files: {e}"
+
+def create_file(file_path: str, content: str = "") -> str:
+    """Creates a new text file or overwrites an existing file with the specified content.
+    Args:
+        file_path: Relative or absolute path where the file should be saved.
+        content: Text content to write into the file.
+    """
+    try:
+        parent_dir = os.path.dirname(os.path.abspath(file_path))
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return f"Successfully created file at '{file_path}', sir."
+    except Exception as e:
+        return f"Failed to create file: {e}"
+
+def delete_file(file_path: str, confirmed: bool = False) -> str:
+    """Deletes a file from the disk safely.
+    Args:
+        file_path: Path to the file to be deleted.
+        confirmed: Set to True ONLY if the user has explicitly confirmed deletion (e.g., said 'yes', 'confirm', or 'proceed').
+    """
+    if not confirmed:
+        return f"CONFIRMATION REQUIRED: Please ask the user for explicit confirmation before deleting '{file_path}'."
+
+    try:
+        if not os.path.exists(file_path):
+            return f"File does not exist: '{file_path}'"
+        os.remove(file_path)
+        return f"Successfully deleted file '{file_path}', sir."
+    except Exception as e:
+        return f"Failed to delete file: {e}"
+
+def list_directory(path: str = ".") -> str:
+    """Lists files and subdirectories in a folder.
+    Args:
+        path: Path to folder (defaults to current working directory).
+    """
+    try:
+        user_home = os.path.expanduser("~")
+        if path.lower() in ['desktop', 'desktop/']:
+            target_path = os.path.join(user_home, 'Desktop')
+        elif path.lower() in ['downloads', 'downloads/']:
+            target_path = os.path.join(user_home, 'Downloads')
+        elif path.lower() in ['documents', 'documents/']:
+            target_path = os.path.join(user_home, 'Documents')
+        else:
+            target_path = path
+            
+        if not os.path.exists(target_path):
+            return f"Folder path does not exist: '{target_path}'"
+            
+        entries = os.listdir(target_path)
+        if not entries:
+            return f"Directory '{target_path}' is empty."
+            
+        items = []
+        for entry in entries[:30]:
+            full_p = os.path.join(target_path, entry)
+            is_dir = "[DIR]" if os.path.isdir(full_p) else "[FILE]"
+            items.append(f"{is_dir} {entry}")
+            
+        return f"Directory contents of '{target_path}':\n" + "\n".join(items)
+    except Exception as e:
+        return f"Failed to list directory: {e}"
+

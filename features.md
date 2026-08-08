@@ -6,9 +6,9 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 
 ## 🧠 Core AI & Voice Architecture
 
-### 1. AI Engine (OpenRouter)
-- **OpenRouter Integration:** Connects exclusively to OpenRouter (`openrouter.ai/api/v1`).
-- **Models Supported:** `nvidia/nemotron-3-ultra-550b-a55b:free` (Configurable via `brain.py`).
+### 1. AI Engine (Multi-Provider)
+- **Multi-API Support:** Dynamically switches between OpenRouter and Gemini API via `settings.json`.
+- **Configurable Models:** Custom model names per provider (`openrouter_model`, `gemini_model`).
 - **Dynamic Tool Bridge (`ToolBridge`):** Converts Python function signatures dynamically into OpenAI-compliant JSON tool schemas via `inspect.signature`.
 
 ### 2. Offline Piper Neural Voice Engine (`VoiceSpeaker`)
@@ -22,7 +22,13 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 - **Dynamic Ambient Noise Calibration:** Spends 0.8s on startup measuring room noise floor and automatically sets an adaptive speech energy threshold (`1.5x` room ambient noise).
 - **Google Neural Speech-to-Text:** Transcribes spoken audio phrases to text in real-time.
 
-### 4. Thread-Safe Queue Event Loop (`main.py`)
+### 4. Priority Output Queue (`OutputManager`)
+- **Centralized Speech Coordinator:** All speech output (user responses, cron notifications, system messages) is routed through a single priority-aware queue.
+- **User Interrupt Priority:** When the user gives a new command, current speech is immediately stopped and all pending cron notifications are cleared from the queue.
+- **Cron Message Queuing:** Background cron notifications (e.g., email alerts) wait in the queue and are spoken only when Ultron is idle — they never interrupt user interactions.
+- **Drain After Response:** After speaking a user response, Ultron automatically drains any queued cron messages before going idle.
+
+### 5. Thread-Safe Queue Event Loop (`main.py`)
 - **Unified Event Pipeline (`queue.Queue`):** Manages incoming voice commands and keyboard inputs in a thread-safe Queue.
 - **Zero-Enter Keypress:** Voice commands trigger Ultron's response loop instantly without waiting for an Enter keypress or hanging input prompts.
 
@@ -59,31 +65,53 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 ### 4. Clipboard Engine (`read_clipboard`, `copy_to_clipboard`)
 - **Windows Clipboard Management:** Reads, inspects, or copies any text, link, URL, or note directly to your Windows Clipboard (`pyperclip`).
 
-### 5. File Finder & Document Reader (`find_files`, `read_file_content`)
+### 5. File Management & Directory Explorer (`find_files`, `read_file_content`, `create_file`, `delete_file`, `list_directory`)
 - **File Search:** Locates files on Desktop, Downloads, or Documents folders.
-- **Text File Reader:** Reads content from `.txt`, `.md`, `.py`, `.json`, or `.csv` files.
+- **Document Reader:** Reads text from `.txt`, `.md`, `.py`, `.json`, or `.csv` files.
+- **File Creator:** Creates or overwrites text files directly with automated parent directory creation.
+- **File Deleter:** Deletes specified files safely from disk.
+- **Directory Explorer:** Lists files and subfolders inside any directory.
 
-### 6. System Power Controls (`system_power_control`)
+### 6. System Cleanup & Recycle Bin (`empty_recycle_bin`, `clean_temp_files`)
+- **Recycle Bin Cleaner:** Empties the Windows Recycle Bin completely using native `SHEmptyRecycleBinW` API.
+- **Temp Cache Cleaner:** Scans and removes temporary files in `%TEMP%` to free up disk space.
+
+### 7. System Power Controls (`system_power_control`)
 - **Power Actions:** Lock workstation (`LockWorkStation`), put PC to sleep (`SetSuspendState`), schedule system shutdown, or cancel a scheduled shutdown.
 
-### 7. Docker Container Management (`docker_plugin`)
+### 8. Docker Container Management (`docker_plugin`)
 - **Lifecycle Control:** Start, stop, and forcefully remove containers by name or ID.
 - **Run & Inspect:** Run new containers in the background from local images, list all downloaded images with their sizes, and list running/stopped containers with their status.
 
-### 8. Desktop Screenshots (`take_screenshot`)
+### 9. Desktop Screenshots (`take_screenshot`)
 - **Triple-Layer Capture Engine:** 
   1. PIL `ImageGrab.grab(all_screens=True)`
   2. PyAutoGUI `screenshot()`
   3. Native Windows PowerShell `.NET System.Drawing` Graphics capture.
 - Saves captures to `screenshots/` directory.
 
-### 9. System Media & Volume Controls (`system_media_control`, `adjust_volume`, `search_spotify`)
+### 10. System Media & Volume Controls (`system_media_control`, `adjust_volume`, `search_spotify`)
 - **Global Media Controls:** Controls global Windows media (Play, Pause, Skip, Previous).
 - **Volume Controls:** Adjusts system volume (Volume Up, Volume Down, Mute).
 - **Spotify Integration:** Searches Spotify for an artist, song, or album and opens it directly in the desktop app.
 
-### 10. Interactive Playwright Web Browser (`BrowserManager`)
+### 11. Interactive Playwright Web Browser (`BrowserManager`)
 - Navigates web pages, searches Google, reads page text, clicks buttons, types text, scrolls, and navigates history in an isolated Playwright Chromium instance.
+
+### 12. Dynamic Configuration Engine (`settings.json`)
+- **Multi-API Provider Switch:** Dynamic switching between OpenRouter and Gemini API (`openrouterapi`, `geminiapi`).
+- **Configurable Models:** Custom model names (`gemini_model`, `openrouter_model`, or `model`).
+- **Microphone Toggle:** Toggle `"microphone_active"` boolean to run in pure keyboard mode or active voice mode.
+
+### 13. API Usage Logger (`usage.json`)
+- **Token Tracker:** Automatically records prompt tokens, completion tokens, total requests, and total tokens after every API interaction.
+- **Detailed Categorization:** Groups stats by global total, active provider, and model name.
+- **Git Ignored:** Saved locally in `usage.json` (ignored in `.gitignore`).
+
+### 14. Background Cron Scheduler (`CronManager`)
+- **Configurable Recurring Tasks:** Configured under `"cron_jobs"` in `settings.json` with custom intervals (e.g. `3600` seconds for 1 hour).
+- **Unread Email Checker (`unread_emails_check`):** Periodically checks Gmail inbox for unread email count and displays native Windows notification popups when new emails arrive.
+- **Extensible Action Registry:** Register new cron jobs easily by adding action handlers into `CronManager.register_action(name, func)`.
 
 ---
 
@@ -96,3 +124,4 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 ### 2. Native Windows Reminders (`set_reminder`)
 - **Background Daemon (`reminder_worker`):** Persistent background thread checking pending ISO 8601 tasks.
 - **Native OS Popups:** Displays native Windows `MessageBoxW` alerts and purges tasks immediately upon trigger.
+

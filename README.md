@@ -10,20 +10,46 @@ Make sure you have Python 3.10+ installed. Then, install the required packages:
 pip install -r requirements.txt
 ```
 
-### 2. Configure Your AI Provider (OpenRouter)
-Ultron uses OpenRouter to connect to top-tier AI models (currently defaulting to `nvidia/nemotron-3-ultra-550b-a55b:free`).
-1. Create a `.env` file in the root directory of this project.
-2. Add your OpenRouter API key to it:
+### 2. Configure Your Settings & API Provider (`settings.json` & `.env`)
+Ultron features a dynamic configuration system via [`settings.json`](file:///c:/Users/dilsh/OneDrive/Desktop/PROJECT-2/settings.json).
+
+#### Step A: Set up API Keys in `.env`
+Create a `.env` file in the root directory:
 ```env
-API_KEY=your_openrouter_api_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
+#### Step B: Configure [`settings.json`](file:///c:/Users/dilsh/OneDrive/Desktop/PROJECT-2/settings.json)
+Customize your AI provider, model selection, microphone mode, and background cron jobs:
+```json
+{
+  "openrouterapi": false,
+  "geminiapi": true,
+  "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "gemini_model": "gemini-3.5-flash",
+  "microphone_active": false,
+  "cron_jobs": {
+    "unread_emails_check": {
+      "enabled": true,
+      "interval_seconds": 3600,
+      "notify_popup": true
+    }
+  }
+}
+```
+
+- **`openrouterapi` / `geminiapi`**: Set one to `true` to select your active AI provider.
+- **`gemini_model` / `openrouter_model`**: Choose the exact AI model you want to use.
+- **`microphone_active`**: Set to `true` for hands-free voice control or `false` for keyboard-only mode.
+- **`cron_jobs`**: Configure automated background scheduled tasks (e.g. hourly unread email checks).
 
 ### 3. Run Ultron
 To start the assistant, simply run:
 ```bash
 python main.py
 ```
-Ultron will automatically download the offline Piper Neural TTS voice model on its first run, which may take a minute. After that, it will calibrate your microphone and start listening!
+Ultron will automatically download the offline Piper Neural TTS voice model on its first run, calibrate your room's ambient noise (if microphone is active), and start processing!
 
 ---
 

@@ -56,6 +56,16 @@ def authenticate_gmail():
     except Exception as e:
         raise Exception(f"Failed to build Gmail service: {e}")
 
+def get_unread_emails_count() -> int:
+    """Fetches total unread messages count from Gmail inbox."""
+    try:
+        service = authenticate_gmail()
+        results = service.users().messages().list(userId='me', labelIds=['INBOX', 'UNREAD']).execute()
+        messages = results.get('messages', [])
+        return len(messages)
+    except Exception:
+        return 0
+
 def read_emails(max_results: int = 5) -> str:
     """Reads the most recent unread emails from the inbox.
     Args:

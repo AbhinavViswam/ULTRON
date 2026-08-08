@@ -11,7 +11,8 @@ from ultron.automation import (
     open_application, close_application, system_media_control, 
     search_spotify, adjust_volume, take_screenshot, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
-    read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control
+    read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
+    empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory
 )
 from ultron.gmail_plugin import read_emails, send_email, draft_email
 from ultron.docker_plugin import (
@@ -59,21 +60,55 @@ class Brain:
         
         # Ensure the latest .env file variables are loaded with override
         load_dotenv(override=True)
-        api_key = os.getenv("API_KEY")
-        if not api_key:
-            raise ValueError("API_KEY is not set correctly in the .env file.")
         
+        # Load Settings
+        settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
+        try:
+            with open(settings_path, "r") as f:
+                settings = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            settings = {"openrouterapi": True, "geminiapi": False}
+            
+        # Select the first API set to true
+        active_api = None
+        for api_name in ["openrouterapi", "geminiapi"]:
+            if settings.get(api_name) is True:
+                active_api = api_name
+                break
+                
+        if not active_api:
+            active_api = "openrouterapi"
+            
+        self.active_api = active_api
         self.db = Database()
         self.browser = BrowserManager()
         
-        # Initialize OpenRouter client
-        self.client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
-        self.selected_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
-        
-        print("\nUltron AI Provider: OpenRouter Mode")
+        if active_api == "openrouterapi":
+            api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("API_KEY")
+            if not api_key:
+                raise ValueError("OPENROUTER_API_KEY or API_KEY is not set correctly in the .env file.")
+                
+            self.client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=api_key,
+            )
+            self.selected_model = settings.get("openrouter_model") or settings.get("model") or "nvidia/nemotron-3-ultra-550b-a55b:free"
+            print("\nUltron AI Provider: OpenRouter Mode")
+            
+        elif active_api == "geminiapi":
+            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY or API_KEY is not set correctly in the .env file.")
+                
+            self.client = OpenAI(
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                api_key=api_key,
+            )
+            self.selected_model = settings.get("gemini_model") or settings.get("model") or "gemini-2.5-flash"
+            print("\nUltron AI Provider: Gemini Mode")
+        else:
+            raise ValueError(f"Unsupported API selected in settings: {active_api}")
+            
         print(f"Selected Model: {self.selected_model}")
         
         # Define memory tools
@@ -160,6 +195,11 @@ class Brain:
             "copy_to_clipboard": copy_to_clipboard,
             "find_files": find_files,
             "read_file_content": read_file_content,
+            "create_file": create_file,
+            "delete_file": delete_file,
+            "list_directory": list_directory,
+            "empty_recycle_bin": empty_recycle_bin,
+            "clean_temp_files": clean_temp_files,
             "system_power_control": system_power_control,
             "read_emails": read_emails,
             "send_email": send_email,
@@ -210,16 +250,70 @@ You have full interactive control over a web browser.
 - WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
-- FILE SEARCH & READ: Use `find_files` to locate files on Desktop/Downloads and `read_file_content` to read text files.
+- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, and `list_directory` to list folder contents.
+- RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
+- DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
 - GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
 - DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images."""
         
-        # Initialize conversation history with OpenRouter format
+        # Initialize conversation history
         self.messages = [{"role": "system", "content": sys_instruct}]
         self.is_asleep = False
         
-        print("Ultron's Brain initialized and ready (OpenRouter Mode).")
+        print("Ultron's Brain initialized and ready.")
+
+    def _record_usage(self, response):
+        """Records token usage from the API response into usage.json."""
+        if not response or not hasattr(response, "usage") or not response.usage:
+            return
+
+        prompt_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+        total_tokens = getattr(response.usage, "total_tokens", 0) or (prompt_tokens + completion_tokens)
+
+        usage_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "usage.json")
+
+        data = {}
+        try:
+            if os.path.exists(usage_path):
+                with open(usage_path, "r") as f:
+                    data = json.load(f)
+        except Exception:
+            data = {}
+
+        data["total_requests"] = data.get("total_requests", 0) + 1
+        data["total_prompt_tokens"] = data.get("total_prompt_tokens", 0) + prompt_tokens
+        data["total_completion_tokens"] = data.get("total_completion_tokens", 0) + completion_tokens
+        data["total_tokens"] = data.get("total_tokens", 0) + total_tokens
+
+        if "by_provider" not in data or not isinstance(data["by_provider"], dict):
+            data["by_provider"] = {}
+        provider = getattr(self, "active_api", "unknown")
+        p_stats = data["by_provider"].setdefault(provider, {
+            "requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
+        })
+        p_stats["requests"] += 1
+        p_stats["prompt_tokens"] += prompt_tokens
+        p_stats["completion_tokens"] += completion_tokens
+        p_stats["total_tokens"] += total_tokens
+
+        if "by_model" not in data or not isinstance(data["by_model"], dict):
+            data["by_model"] = {}
+        model_name = getattr(self, "selected_model", "unknown")
+        m_stats = data["by_model"].setdefault(model_name, {
+            "requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
+        })
+        m_stats["requests"] += 1
+        m_stats["prompt_tokens"] += prompt_tokens
+        m_stats["completion_tokens"] += completion_tokens
+        m_stats["total_tokens"] += total_tokens
+
+        try:
+            with open(usage_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     def process_input(self, user_text: str) -> str:
         """Sends user text to OpenRouter and manages tool calls manually."""
@@ -267,6 +361,7 @@ You have full interactive control over a web browser.
                         tool_choice="auto"
                     )
                     if response and response.choices:
+                        self._record_usage(response)
                         break
                 except Exception as e:
                     if attempt == 2:
@@ -275,14 +370,14 @@ You have full interactive control over a web browser.
                     time.sleep(2)
             
             if not response or not response.choices:
-                return "The OpenRouter model server returned an empty response. Please try again in a few seconds!"
+                return "The AI model server returned an empty response. Please try again in a few seconds!"
                 
             response_message = response.choices[0].message
             
             # Keep looping as long as the model wants to call tools
             while response_message.tool_calls:
-                # Convert message to dict format for safe history tracking
-                self.messages.append(response_message.model_dump())
+                # Convert message to dict format for safe history tracking (exclude_none=True for Gemini compatibility)
+                self.messages.append(response_message.model_dump(exclude_none=True))
                 
                 # Execute each tool
                 for tool_call in response_message.tool_calls:
@@ -320,6 +415,7 @@ You have full interactive control over a web browser.
                             tool_choice="auto"
                         )
                         if response and response.choices:
+                            self._record_usage(response)
                             break
                     except Exception as e:
                         if attempt == 2:
@@ -328,7 +424,7 @@ You have full interactive control over a web browser.
                         time.sleep(2)
                 
                 if not response or not response.choices:
-                    return "The OpenRouter model server returned an empty response during tool execution."
+                    return "The AI model server returned an empty response during tool execution."
                     
                 response_message = response.choices[0].message
             
