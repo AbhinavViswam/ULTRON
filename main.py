@@ -13,8 +13,9 @@ from dotenv import load_dotenv
 is_processing = False
 stdout_lock = threading.Lock()
 
-def reminder_worker(db):
-    """Background thread to check for pending reminders and show a popup."""
+def reminder_worker(db, output_manager):
+    """Background thread to check for pending reminders and trigger toast & speech."""
+    from ultron.plugins.notification_plugin import send_toast
     while True:
         try:
             tasks = db.get_pending_tasks()
@@ -24,10 +25,13 @@ def reminder_worker(db):
                 if scheduled_for and scheduled_for <= now_iso:
                     # Delete the task from the database so it doesn't clutter
                     db.delete_task(task_id)
-                    # Show native Windows popup (0x40 = Info icon, 0x40000 = Topmost)
-                    ctypes.windll.user32.MessageBoxW(0, f"Reminder:\n\n{desc}", "Ultron Alert", 0x40 | 0x40000)
-        except Exception:
-            pass
+                    # Trigger visual toast
+                    send_toast("Ultron Reminder", desc)
+                    # Trigger high-priority audio interruption
+                    if output_manager:
+                        output_manager.enqueue(f"Sir, here is your reminder: {desc}", source="system")
+        except Exception as e:
+            print(f"[Reminder Error] {e}")
         time.sleep(15) # Check every 15 seconds
 
 # Ensure we can import from the ultron package
@@ -135,7 +139,7 @@ def main():
             listener.start_listening()
 
         # Start the background reminder thread
-        reminder_thread = threading.Thread(target=reminder_worker, args=(brain.db,), daemon=True)
+        reminder_thread = threading.Thread(target=reminder_worker, args=(brain.db, output_manager), daemon=True)
         reminder_thread.start()
 
         # Start the background Cron Manager (with output_manager for queued speech)

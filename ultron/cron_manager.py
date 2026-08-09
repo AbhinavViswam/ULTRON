@@ -5,6 +5,7 @@ import ctypes
 import threading
 import datetime
 from ultron.plugins.gmail_plugin import get_unread_emails_count
+from ultron.plugins.notification_plugin import send_toast
 
 class CronManager:
     """Manages scheduled background cron tasks for Ultron."""
@@ -51,8 +52,7 @@ class CronManager:
                 self._speak(spoken_msg)
                     
                 if job_config.get("notify_popup", False):
-                    msg_text = f"Notification:\n\n{spoken_msg}"
-                    ctypes.windll.user32.MessageBoxW(0, msg_text, "Ultron Email Alert", 0x40 | 0x40000)
+                    send_toast("Ultron Email Alert", f"Sir, you have {count} unread email(s).")
         except Exception as e:
             print(f"[Cron Error] Failed unread email check: {e}")
             

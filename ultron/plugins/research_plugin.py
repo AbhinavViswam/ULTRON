@@ -18,6 +18,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import html
+from ultron.plugins.notification_plugin import send_toast
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +300,7 @@ def run_background_research_task(topic: str, client, model: str, output_manager=
 
             # 6. Notify user concise message: research complete, saved to .md file (DO NOT READ IT OUT LOUD)
             notification = f"Sir, I have completed the research on '{topic}' and saved it as a .md file in the data/research folder."
+            send_toast("Research Complete", f"Your report on '{topic}' is ready.")
             if output_manager:
                 output_manager.enqueue(notification, source="system")
             else:
@@ -306,6 +308,7 @@ def run_background_research_task(topic: str, client, model: str, output_manager=
 
         except Exception as e:
             err_msg = f"Sir, background research on '{topic}' failed: {e}"
+            send_toast("Research Failed", f"Failed to research '{topic}'.")
             if output_manager:
                 output_manager.enqueue(err_msg, source="system")
             else:

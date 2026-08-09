@@ -131,10 +131,12 @@ class Brain:
             self.db.save_memory(category, key, value, importance)
             return "Memory saved successfully."
 
-        def set_reminder(description: str, scheduled_for: str) -> str:
-            """Sets a reminder for a specific time in the future. scheduled_for MUST be an ISO 8601 string."""
+        def set_reminder(description: str, delay_seconds: int) -> str:
+            """Sets a reminder to trigger after a certain number of seconds. E.g., for 5 minutes, pass 300."""
+            import datetime
+            scheduled_for = (datetime.datetime.now() + datetime.timedelta(seconds=delay_seconds)).isoformat()
             self.db.add_task(description, scheduled_for)
-            return f"Reminder successfully set for {scheduled_for}."
+            return f"Reminder successfully set to trigger in {delay_seconds} seconds."
 
         def search_memories(query: str) -> str:
             """Searches for relevant memories. Call this when you need to recall a fact about the user."""
@@ -280,7 +282,8 @@ class Brain:
             "create_workflow": create_workflow,
             "run_workflow": run_workflow_tool,
             "list_workflows": list_workflows,
-            "delete_workflow": delete_workflow
+            "delete_workflow": delete_workflow,
+            "set_reminder": set_reminder
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -317,9 +320,9 @@ CURRENT SYSTEM TIME: {now_str}
 
 # MEMORY ENGINE (CRITICAL)
 - TO REMEMBER: If the user tells you a fact, preference, or detail to remember, use `save_memory`.
-- TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database.
+- TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?", "what is my github"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database!
 - TO RECALL CHATS: If the user references a past conversation, use `search_past_conversations`.
-- REMINDERS: If the user asks to be reminded of something at a specific time, use the `set_reminder` tool with the calculated ISO 8601 timestamp. DO NOT use `save_memory` for time-based reminders.
+- REMINDERS: If the user asks to be reminded of something, calculate the delay in seconds and use the `set_reminder` tool with `delay_seconds`. DO NOT use `save_memory` for time-based reminders.
 
 # BROWSER AUTOMATION
 You have full interactive control over a web browser.
@@ -401,6 +404,11 @@ CURRENT SYSTEM TIME: {now_str}
 - You DO NOT know personal details about the user by default. Use memory tools to find out.
 - INTERNET ACCESS: For factual information, current events, or questions about specific people/things, you MUST use the `web_search` tool to get the latest up-to-date information before answering. If the tool fails or you have no internet access, you may fall back to answering from your internal training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST inform the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data.
 
+# MEMORY ENGINE (CRITICAL)
+- TO REMEMBER: If the user tells you a fact, preference, or detail to remember, use `save_memory`.
+- TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?", "what is my github"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database!
+- TO RECALL CHATS: If the user references a past conversation, use `search_past_conversations`.
+
 # AVAILABLE TOOLS
 You have the following tools available. When the user asks you to DO something (open an app, search the web, play music, check system health, etc.), you MUST use a tool.
 
@@ -439,7 +447,7 @@ Your response: Taking a screenshot now, sir.
 - If no tool is needed (e.g., general chat or a question), just respond normally WITHOUT any <tool_call> block.
 - For destructive actions (delete_file, empty_recycle_bin), ask for confirmation first before calling the tool.
 - To remember facts, use save_memory. To recall facts about the user, use search_memories FIRST.
-- To set time-based reminders, use set_reminder with an ISO 8601 timestamp."""
+- To set time-based reminders, calculate the delay in seconds and use the set_reminder tool with delay_seconds."""
 
     def _parse_tool_calls_from_text(self, text: str) -> list:
         """Parse <tool_call>...</tool_call> blocks from model text output.
