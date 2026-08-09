@@ -83,12 +83,10 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 - **Lifecycle Control:** Start, stop, and forcefully remove containers by name or ID.
 - **Run & Inspect:** Run new containers in the background from local images, list all downloaded images with their sizes, and list running/stopped containers with their status.
 
-### 9. Desktop Screenshots (`take_screenshot`)
-- **Triple-Layer Capture Engine:** 
-  1. PIL `ImageGrab.grab(all_screens=True)`
-  2. PyAutoGUI `screenshot()`
-  3. Native Windows PowerShell `.NET System.Drawing` Graphics capture.
-- Saves captures to `screenshots/` directory.
+### 9. Screen Awareness Engine (`screen_plugin`)
+- **Visual Context**: Ultron can take screenshots (`screen_capture`) to "see" your current screen, passing the image data to Vision-capable models (like Gemini 1.5 Pro or GPT-4o).
+- **Persistent Screenshots**: Every captured screenshot is automatically saved with a timestamp to the `screenshots/` directory for your records.
+- **Screen Context**: Uses `pygetwindow` to determine the active window title and can also track cursor position or find specific UI elements on screen (`screen_find`).
 
 ### 10. System Media & Volume Controls (`system_media_control`, `adjust_volume`, `search_spotify`)
 - **Global Media Controls:** Controls global Windows media (Play, Pause, Skip, Previous).
@@ -113,14 +111,14 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 
 ### 14. Background Cron Scheduler (`CronManager`)
 - **Configurable Recurring Tasks:** Configured under `"cron_jobs"` in `settings.json` with custom intervals (e.g. `3600` seconds for 1 hour).
-- **Unread Email Checker (`unread_emails_check`):** Periodically checks Gmail inbox for unread email count and displays native Windows notification popups when new emails arrive.
+- **Unread Email Checker (`unread_emails_check`):** Periodically checks Gmail inbox for unread email count and displays native, non-blocking Windows Toast Notifications (`winotify`) when new emails arrive.
 - **Extensible Action Registry:** Register new cron jobs easily by adding action handlers into `CronManager.register_action(name, func)`.
 
 ### 15. Background Research Engine (`research_plugin`)
 - **Asynchronous Execution:** Conducts multi-step deep web research in a non-blocking background thread while you continue chatting.
 - **Search & Scrape Pipeline:** Automatically queries DuckDuckGo (no API keys required), extracts top URLs, and fetches raw article texts by stripping out noise (ads/scripts/navbars).
 - **AI Synthesis:** Passes scraped web content to the LLM to generate a clean, highly structured Markdown report (Executive Summary, Key Findings, Pros & Cons, Recommendations, Sources).
-- **Silent File Output:** Saves final `.md` reports directly to `data/research/` and concisely notifies the user without reading the entire document out loud.
+- **Silent File Output:** Saves final `.md` reports directly to `data/research/` and slides a native Windows Toast Notification into view to let you know the report is ready.
 
 ### 16. Workflow Engine (`workflow_plugin`)
 - **One-Command Automation:** Save named multi-step action sequences (e.g., "RateUp Development Setup") and replay them with a single voice or text command.
@@ -137,7 +135,7 @@ Welcome to the comprehensive feature documentation for **Ultron**, your advanced
 - **Memory Storage (`save_memory`, `search_memories`):** Stores user facts, preferences, and details with smart keyword search and stop-word filtering.
 - **Chat Archive (`search_past_conversations`):** Logs user inputs and model responses by unique session ID.
 
-### 2. Native Windows Reminders (`set_reminder`)
-- **Background Daemon (`reminder_worker`):** Persistent background thread checking pending ISO 8601 tasks.
-- **Native OS Popups:** Displays native Windows `MessageBoxW` alerts and purges tasks immediately upon trigger.
-
+### 2. Priority Windows Reminders (`set_reminder`)
+- **Background Daemon (`reminder_worker`):** Persistent background thread checking pending scheduled tasks.
+- **AI-Optimized Scheduling:** The AI generates reminders using a simple `delay_seconds` integer instead of complex ISO 8601 strings, drastically improving reliability for local LLMs.
+- **Dual-Layer Alert System:** When a reminder triggers, it pushes a sleek, non-blocking Toast Notification to the screen (`winotify`) AND queues the spoken reminder at the highest priority in the `OutputManager`, politely interrupting Ultron's current speech to read your reminder out loud!
