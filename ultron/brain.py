@@ -26,6 +26,10 @@ from ultron.plugins.research_plugin import (
 from ultron.plugins.workflow_plugin import (
     create_workflow, run_workflow, list_workflows, delete_workflow
 )
+from ultron.plugins.screen_plugin import (
+    screen_capture, screen_analyze, screen_find, screen_get_resolution,
+    screen_get_active_window, screen_get_mouse_position
+)
 
 class ToolBridge:
     """Helper to convert Python functions to OpenAI JSON schemas."""
@@ -283,7 +287,13 @@ class Brain:
             "run_workflow": run_workflow_tool,
             "list_workflows": list_workflows,
             "delete_workflow": delete_workflow,
-            "set_reminder": set_reminder
+            "set_reminder": set_reminder,
+            "screen_capture": screen_capture,
+            "screen_analyze": screen_analyze,
+            "screen_find": screen_find,
+            "screen_get_resolution": screen_get_resolution,
+            "screen_get_active_window": screen_get_active_window,
+            "screen_get_mouse_position": screen_get_mouse_position
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -337,7 +347,11 @@ You have full interactive control over a web browser.
 - Use `close_application` to close local desktop apps.
 - TO CONTROL MUSIC: You MUST use `system_media_control` with action 'play', 'pause', 'next', or 'prev'. 
 - TO ADJUST VOLUME: Use `adjust_volume` with action 'volume_up', 'volume_down', or 'mute'.
-- TO TAKE SCREENSHOT: Use `take_screenshot` to capture the full screen and save it to disk.
+
+# SCREEN AWARENESS
+- If the user asks "what is on my screen" or asks about a visual element, use `screen_capture`. This permanently saves a screenshot to the screenshots folder and returns the image data to you for analysis.
+- If you need to find where something is on screen, use `screen_find`.
+- To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - TO SEARCH MUSIC: Use the `search_spotify` tool to open it directly in the Spotify app.
 - SYSTEM HEALTH: Use `get_system_health` to check CPU, RAM, Battery %, and Disk storage space.
 - WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
@@ -433,11 +447,16 @@ Your response: Right away, sir.
 {{"name": "web_search", "arguments": {{"query": "latest news"}}}}
 </tool_call>
 
-User: "Take a screenshot"
-Your response: Taking a screenshot now, sir.
+User: "What is on my screen right now?"
+Your response: Let me take a look at your screen, sir.
 <tool_call>
-{{"name": "take_screenshot", "arguments": {{}}}}
+{{"name": "screen_capture", "arguments": {{}}}}
 </tool_call>
+
+# SCREEN AWARENESS
+- If the user asks "what is on my screen" or asks about a visual element, use `screen_capture`. This permanently saves a screenshot and returns the image data to you.
+- If you need to find where something is on screen, use `screen_find`.
+- To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 
 # RULES FOR TOOL CALLING
 - NEVER output raw Python code, bash commands, or explain how to call a function.
