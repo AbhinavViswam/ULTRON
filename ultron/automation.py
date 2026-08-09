@@ -855,3 +855,26 @@ def list_directory(path: str = ".") -> str:
     except Exception as e:
         return f"Failed to list directory: {e}"
 
+def open_folder(path: str) -> str:
+    """Opens a folder in the native Windows File Explorer.
+    Args:
+        path: Path to the folder (e.g., 'Downloads', 'Desktop', or 'C:/path/to/folder').
+    """
+    try:
+        user_home = os.path.expanduser("~")
+        if path.lower() in ['desktop', 'desktop/']:
+            target_path = os.path.join(user_home, 'Desktop')
+        elif path.lower() in ['downloads', 'downloads/']:
+            target_path = os.path.join(user_home, 'Downloads')
+        elif path.lower() in ['documents', 'documents/']:
+            target_path = os.path.join(user_home, 'Documents')
+        else:
+            target_path = path
+
+        if not os.path.exists(target_path):
+            return f"Folder does not exist: '{target_path}'"
+
+        os.startfile(target_path)
+        return f"Successfully opened folder: '{target_path}'"
+    except Exception as e:
+        return f"Failed to open folder: {e}"

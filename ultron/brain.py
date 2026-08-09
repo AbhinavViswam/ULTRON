@@ -13,7 +13,7 @@ from ultron.automation import (
     search_spotify, adjust_volume, take_screenshot, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
-    empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory
+    empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder
 )
 from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
 from ultron.plugins.docker_plugin import (
@@ -293,7 +293,8 @@ class Brain:
             "screen_find": screen_find,
             "screen_get_resolution": screen_get_resolution,
             "screen_get_active_window": screen_get_active_window,
-            "screen_get_mouse_position": screen_get_mouse_position
+            "screen_get_mouse_position": screen_get_mouse_position,
+            "open_folder": open_folder
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -357,7 +358,7 @@ You have full interactive control over a web browser.
 - WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
-- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, and `list_directory` to list folder contents.
+- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
 - DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
@@ -457,6 +458,7 @@ Your response: Let me take a look at your screen, sir.
 - If the user asks "what is on my screen" or asks about a visual element, use `screen_capture`. This permanently saves a screenshot and returns the image data to you.
 - If you need to find where something is on screen, use `screen_find`.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
+- To open file system folders like Downloads or Desktop, use `open_folder`.
 
 # RULES FOR TOOL CALLING
 - NEVER output raw Python code, bash commands, or explain how to call a function.

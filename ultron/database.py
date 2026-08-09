@@ -1,24 +1,42 @@
 import sqlite3
 import os
+import uuid
 from datetime import datetime
+
+try:
+    import chromadb
+except ImportError:
+    chromadb = None
 
 class Database:
     def __init__(self, db_path="data/ultron.db"):
         # Ensure the directory exists
-        # Make path relative to the project root (where main.py is)
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         full_db_path = os.path.join(base_dir, db_path)
-        
         os.makedirs(os.path.dirname(full_db_path), exist_ok=True)
         self.db_path = full_db_path
+        
         self._init_db()
+        
+        # Initialize ChromaDB Vector Database for semantic memory
+        if chromadb is None:
+            print("[Warning] chromadb not installed. Semantic memory will fail.")
+            self.chroma_client = None
+            self.memories_col = None
+            self.chat_history_col = None
+        else:
+            chroma_dir = os.path.join(base_dir, "data", "chroma")
+            os.makedirs(chroma_dir, exist_ok=True)
+            self.chroma_client = chromadb.PersistentClient(path=chroma_dir)
+            self.memories_col = self.chroma_client.get_or_create_collection(name="memories")
+            self.chat_history_col = self.chroma_client.get_or_create_collection(name="chat_history")
 
     def _init_db(self):
-        """Initialize the database tables if they do not exist."""
+        """Initialize the SQLite tables (for exact/chronological storage)."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # Create chat_history table
+            # Create chat_history table (for chronological loading)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS chat_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,7 +53,7 @@ class Database:
             if 'session_id' not in columns:
                 cursor.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT")
             
-            # Create tasks table
+            # Create tasks table (for exact time/state queries)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,31 +63,29 @@ class Database:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
-            # Create memories table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    importance INTEGER DEFAULT 5,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
             conn.commit()
 
     def save_message(self, session_id: str, role: str, message: str):
-        """Save a message to the chat history log with a session ID."""
+        """Save a message to both SQLite (chronological) and ChromaDB (semantic)."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 1. Save to SQLite
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO chat_history (session_id, role, message)
-                VALUES (?, ?, ?)
-            ''', (session_id, role, message))
+                INSERT INTO chat_history (session_id, role, message, timestamp)
+                VALUES (?, ?, ?, ?)
+            ''', (session_id, role, message, timestamp))
             conn.commit()
+            
+        # 2. Save to ChromaDB
+        if self.chat_history_col:
+            doc_id = str(uuid.uuid4())
+            self.chat_history_col.add(
+                documents=[message],
+                metadatas=[{"role": role, "session_id": session_id, "timestamp": timestamp}],
+                ids=[doc_id]
+            )
 
     def add_task(self, description: str, scheduled_for: str = None):
         """Add a new task for scheduling."""
@@ -112,60 +128,70 @@ class Database:
                 WHERE id = ?
             ''', (task_id,))
             conn.commit()
+            
     def save_memory(self, category: str, key: str, value: str, importance: int):
-        """Save a new memory to the database."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO memories (category, key, value, importance)
-                VALUES (?, ?, ?, ?)
-            ''', (category, key, value, importance))
-            conn.commit()
+        """Save a new memory to the Vector DB."""
+        if not self.memories_col:
+            return
+            
+        doc_id = str(uuid.uuid4())
+        # Combine into a single semantic string
+        semantic_text = f"[{category}] {key}: {value}"
+        self.memories_col.add(
+            documents=[semantic_text],
+            metadatas=[{"category": category, "key": key, "importance": importance}],
+            ids=[doc_id]
+        )
             
     def search_memories(self, query: str = ""):
-        """Search memories using smart keyword matching, or return all top memories as fallback."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        """Search memories using Vector Semantic matching."""
+        if not self.memories_col:
+            return []
             
-            if not query or len(query.strip()) == 0:
-                cursor.execute('SELECT category, key, value, importance FROM memories ORDER BY importance DESC LIMIT 15')
-                return cursor.fetchall()
-                
-            stop_words = {"who", "what", "where", "is", "my", "am", "i", "the", "a", "an", "user", "identity", "me", "tell", "details"}
-            words = [w.strip() for w in query.lower().split() if w.strip() not in stop_words and len(w.strip()) > 1]
-            
-            if not words:
-                cursor.execute('SELECT category, key, value, importance FROM memories ORDER BY importance DESC LIMIT 15')
-                return cursor.fetchall()
-                
-            where_clauses = []
-            params = []
-            for word in words:
-                where_clauses.append("(LOWER(key) LIKE ? OR LOWER(value) LIKE ? OR LOWER(category) LIKE ?)")
-                term = f"%{word}%"
-                params.extend([term, term, term])
-                
-            sql = f"SELECT category, key, value, importance FROM memories WHERE {' OR '.join(where_clauses)} ORDER BY importance DESC LIMIT 15"
-            cursor.execute(sql, params)
-            results = cursor.fetchall()
-            
-            # Fallback: if no specific match, return top memories so AI has context
-            if not results:
-                cursor.execute('SELECT category, key, value, importance FROM memories ORDER BY importance DESC LIMIT 15')
-                results = cursor.fetchall()
-                
+        if not query or len(query.strip()) == 0:
+            # Fallback if no query: just return up to 15 recent memories
+            data = self.memories_col.get(limit=15)
+            # Match the legacy tuple return format for backwards compatibility
+            results = []
+            if data and data['documents']:
+                for i in range(len(data['documents'])):
+                    meta = data['metadatas'][i]
+                    results.append((meta['category'], meta['key'], data['documents'][i], meta['importance']))
             return results
             
+        results_data = self.memories_col.query(
+            query_texts=[query],
+            n_results=15
+        )
+        
+        # Format results to match the legacy (category, key, value, importance) tuple return
+        results = []
+        if results_data and results_data['documents'] and len(results_data['documents']) > 0:
+            docs = results_data['documents'][0]
+            metas = results_data['metadatas'][0]
+            for i in range(len(docs)):
+                meta = metas[i]
+                results.append((meta['category'], meta['key'], docs[i], meta['importance']))
+                
+        return results
+            
     def search_chat_history(self, query: str, limit: int = 3):
-        """Search past conversations in chat history using a basic LIKE query."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            search_term = f"%{query}%"
-            cursor.execute('''
-                SELECT role, message, timestamp
-                FROM chat_history
-                WHERE message LIKE ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            ''', (search_term, limit))
-            return cursor.fetchall()
+        """Search past conversations in chat history using Vector Semantic matching."""
+        if not self.chat_history_col:
+            return []
+            
+        results_data = self.chat_history_col.query(
+            query_texts=[query],
+            n_results=limit
+        )
+        
+        results = []
+        if results_data and results_data['documents'] and len(results_data['documents']) > 0:
+            docs = results_data['documents'][0]
+            metas = results_data['metadatas'][0]
+            for i in range(len(docs)):
+                meta = metas[i]
+                # Match the legacy tuple return format: (role, message, timestamp)
+                results.append((meta['role'], docs[i], meta.get('timestamp', '')))
+                
+        return results
