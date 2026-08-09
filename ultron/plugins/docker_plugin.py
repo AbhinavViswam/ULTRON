@@ -21,6 +21,17 @@ def docker_start_daemon() -> str:
     except Exception as e:
         return f"Failed to start Docker Desktop: {e}"
 
+def docker_stop_daemon() -> str:
+    """Stops the Docker Desktop background engine on Windows."""
+    import subprocess
+    try:
+        subprocess.run(["taskkill", "/IM", "Docker Desktop.exe", "/F"], check=True, capture_output=True)
+        return "Successfully closed Docker Desktop."
+    except subprocess.CalledProcessError as e:
+        return f"Failed to close Docker Desktop or it wasn't running. Error: {e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)}"
+    except Exception as e:
+        return f"Failed to close Docker Desktop: {e}"
+
 def docker_list_containers(show_all: bool = False) -> str:
     """Lists Docker containers. If show_all is True, includes stopped containers."""
     try:

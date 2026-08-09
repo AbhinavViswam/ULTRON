@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import datetime
 import inspect
@@ -77,7 +78,7 @@ class Brain:
             
         # Select the first API set to true
         active_api = None
-        for api_name in ["openrouterapi", "geminiapi"]:
+        for api_name in ["openrouterapi", "geminiapi", "localapi"]:
             if settings.get(api_name) is True:
                 active_api = api_name
                 break
@@ -112,6 +113,13 @@ class Brain:
             )
             self.selected_model = settings.get("gemini_model") or settings.get("model") or "gemini-2.5-flash"
             print("\nUltron AI Provider: Gemini Mode")
+        elif active_api == "localapi":
+            self.client = OpenAI(
+                base_url=settings.get("local_api_url", "http://localhost:11434/v1"),
+                api_key=os.getenv("LOCAL_API_KEY", "ollama"),
+            )
+            self.selected_model = settings.get("local_model") or settings.get("model") or "gemma4:e2b"
+            print("\nUltron AI Provider: Local Mode")
         else:
             raise ValueError(f"Unsupported API selected in settings: {active_api}")
             
@@ -279,9 +287,28 @@ class Brain:
         self.tools_schema = [ToolBridge.function_to_schema(func) for func in self.tool_functions.values()]
         
         now_str = datetime.datetime.now().strftime('%A, %Y-%m-%d %H:%M:%S')
-        sys_instruct = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
+        
+        # Build system prompt — for local models, embed tool descriptions directly
+        if self.active_api == "localapi":
+            sys_instruct = self._build_local_system_prompt(now_str)
+        else:
+            sys_instruct = self._build_cloud_system_prompt(now_str)
+        
+        # Initialize conversation history
+        self.messages = [{"role": "system", "content": sys_instruct}]
+        self.is_asleep = False
+        
+        print("Ultron's Brain initialized and ready.")
+
+    def _build_cloud_system_prompt(self, now_str: str) -> str:
+        """Build the system prompt for cloud API providers (OpenRouter / Gemini)."""
+        return f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
 
 CURRENT SYSTEM TIME: {now_str}
+
+# CRITICAL TOOL USAGE RULES
+- You are equipped with a set of tools (functions). When the user asks you to perform an action (e.g., search the web, open an application, play music), you MUST invoke the provided tool natively via the tool-calling JSON API.
+- DO NOT output raw Python code, bash scripts, or literal string names like `open_application('spotify')`. You must use the actual tool-calling format.
 
 # CORE RULES
 - Provide concise, accurate, and professional answers.
@@ -319,6 +346,7 @@ You have full interactive control over a web browser.
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
 - GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
 - DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images.
+- QUICK WEB SEARCH: For quick facts, current events, or real-time data, use `web_search` to query the internet and answer the user directly. If the search fails (e.g., no internet), fall back to answering from your training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST tell the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data. If you need more details from a specific page, use `research_read_url`.
 
 # RESEARCH PLUGIN (Background Pipeline)
 When the user asks you to research a topic, investigate something, or look into a technology (e.g., "Research whether Next.js 17 is worth upgrading to"):
@@ -335,12 +363,105 @@ When the user asks you to research a topic, investigate something, or look into 
 - RUN: When the user asks to "start", "run", or "execute" a workflow by name, use `run_workflow`.
 - LIST: When the user asks to see or show their workflows, use `list_workflows`.
 - DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`."""
+
+    def _build_local_tools_prompt(self) -> str:
+        """Build a compact text-based tool listing for embedding into a local model's system prompt."""
+        lines = []
+        for name, func in self.tool_functions.items():
+            sig = inspect.signature(func)
+            params = []
+            for pname, p in sig.parameters.items():
+                ptype = "string"
+                if p.annotation == int:
+                    ptype = "integer"
+                elif p.annotation == bool:
+                    ptype = "boolean"
+                optional = "" if p.default == inspect.Parameter.empty else ", optional"
+                params.append(f"{pname} ({ptype}{optional})")
+            params_str = ", ".join(params) if params else "(no arguments)"
+            doc = (func.__doc__ or "").split("\n")[0].strip()
+            lines.append(f"- {name}({params_str}): {doc}")
+        return "\n".join(lines)
+
+    def _build_local_system_prompt(self, now_str: str) -> str:
+        """Build the system prompt for LOCAL models with embedded tool descriptions.
         
-        # Initialize conversation history
-        self.messages = [{"role": "system", "content": sys_instruct}]
-        self.is_asleep = False
-        
-        print("Ultron's Brain initialized and ready.")
+        Since local models don't support the OpenAI tool-calling API, we embed all tool
+        descriptions directly and instruct the model to output a specific XML-tagged
+        JSON block when it wants to call a tool.
+        """
+        tools_text = self._build_local_tools_prompt()
+        return f"""You are Ultron, an advanced, highly intelligent desktop AI assistant running on a Windows PC.
+
+CURRENT SYSTEM TIME: {now_str}
+
+# CORE RULES
+- Provide concise, accurate, and professional answers.
+- ALWAYS address the user respectfully as "sir".
+- You DO NOT know personal details about the user by default. Use memory tools to find out.
+- INTERNET ACCESS: For factual information, current events, or questions about specific people/things, you MUST use the `web_search` tool to get the latest up-to-date information before answering. If the tool fails or you have no internet access, you may fall back to answering from your internal training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST inform the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data.
+
+# AVAILABLE TOOLS
+You have the following tools available. When the user asks you to DO something (open an app, search the web, play music, check system health, etc.), you MUST use a tool.
+
+{tools_text}
+
+# HOW TO CALL A TOOL (CRITICAL - FOLLOW EXACTLY)
+When you want to use a tool, you MUST output EXACTLY this format:
+<tool_call>
+{{"name": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}
+</tool_call>
+
+Examples:
+User: "Open Spotify"
+Your response: Yes sir, opening Spotify for you now.
+<tool_call>
+{{"name": "open_application", "arguments": {{"app_name": "spotify"}}}}
+</tool_call>
+
+User: "Search Google for latest news"
+Your response: Right away, sir.
+<tool_call>
+{{"name": "web_search", "arguments": {{"query": "latest news"}}}}
+</tool_call>
+
+User: "Take a screenshot"
+Your response: Taking a screenshot now, sir.
+<tool_call>
+{{"name": "take_screenshot", "arguments": {{}}}}
+</tool_call>
+
+# RULES FOR TOOL CALLING
+- NEVER output raw Python code, bash commands, or explain how to call a function.
+- NEVER say "I cannot do that" if a matching tool exists. USE THE TOOL.
+- You can call multiple tools by including multiple <tool_call> blocks.
+- After a tool runs, you will receive its result in a message. Use the result to answer the user.
+- If no tool is needed (e.g., general chat or a question), just respond normally WITHOUT any <tool_call> block.
+- For destructive actions (delete_file, empty_recycle_bin), ask for confirmation first before calling the tool.
+- To remember facts, use save_memory. To recall facts about the user, use search_memories FIRST.
+- To set time-based reminders, use set_reminder with an ISO 8601 timestamp."""
+
+    def _parse_tool_calls_from_text(self, text: str) -> list:
+        """Parse <tool_call>...</tool_call> blocks from model text output.
+        Returns a list of dicts: [{"name": "...", "arguments": {...}}, ...]
+        """
+        calls = []
+        # Match all <tool_call> ... </tool_call> blocks
+        pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+        matches = re.findall(pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                parsed = json.loads(match)
+                if "name" in parsed:
+                    calls.append(parsed)
+            except json.JSONDecodeError:
+                pass
+        return calls
+
+    def _strip_tool_calls_from_text(self, text: str) -> str:
+        """Remove <tool_call>...</tool_call> blocks from model output to get the clean chat text."""
+        cleaned = re.sub(r'<tool_call>\s*\{.*?\}\s*</tool_call>', '', text, flags=re.DOTALL)
+        return cleaned.strip()
 
     def _record_usage(self, response):
         """Records token usage from the API response into usage.json."""
@@ -394,9 +515,8 @@ When the user asks you to research a topic, investigate something, or look into 
         except Exception:
             pass
 
-    def process_input(self, user_text: str) -> str:
-        """Sends user text to OpenRouter and manages tool calls manually."""
-        # Hardcoded Sleep & Wakeup handling (No LLM API calls while asleep)
+    def _handle_sleep_wake(self, user_text: str):
+        """Check for sleep/wake commands. Returns (handled: bool, reply: str|None)."""
         text_lower = user_text.lower().strip()
         sleep_phrases = ["go to sleep", "take a nap", "take a rest"]
         wake_phrases = ["wake up", "get up"]
@@ -413,17 +533,107 @@ When the user asks you to research a topic, investigate something, or look into 
                 reply = "I am awake now, sir! How can I assist you?"
                 self.db.save_message(session_id=self.session_id, role='user', message=user_text)
                 self.db.save_message(session_id=self.session_id, role='model', message=reply)
-                return reply
+                return True, reply
             else:
-                return None
+                return True, None
         else:
             if is_sleep_cmd:
                 self.is_asleep = True
                 reply = "Going to sleep now, sir. Zzz... Say 'wake up' or 'get up' when you need me!"
                 self.db.save_message(session_id=self.session_id, role='user', message=user_text)
                 self.db.save_message(session_id=self.session_id, role='model', message=reply)
-                return reply
+                return True, reply
 
+        return False, None
+
+    def process_input(self, user_text: str) -> str:
+        """Routes user input to the appropriate handler based on the active API."""
+        handled, reply = self._handle_sleep_wake(user_text)
+        if handled:
+            return reply
+
+        if self.active_api == "localapi":
+            return self._process_input_local(user_text)
+        else:
+            return self._process_input_cloud(user_text)
+
+    def _process_input_local(self, user_text: str) -> str:
+        """Process input using a local model with manual text-based tool calling.
+        
+        Instead of relying on the OpenAI tools API, we parse the model's text
+        output for <tool_call> JSON blocks and execute them ourselves.
+        """
+        try:
+            self.db.save_message(session_id=self.session_id, role='user', message=user_text)
+            self.messages.append({"role": "user", "content": user_text})
+
+            max_tool_rounds = 5  # Prevent infinite loops
+
+            for _ in range(max_tool_rounds):
+                # Call local model WITHOUT tools/tool_choice params
+                for attempt in range(3):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.selected_model,
+                            messages=self.messages,
+                        )
+                        if response and response.choices:
+                            self._record_usage(response)
+                            break
+                    except Exception as e:
+                        if attempt == 2:
+                            raise e
+                        import time
+                        time.sleep(2)
+
+                if not response or not response.choices:
+                    return "The local AI model returned an empty response. Is Ollama running?"
+
+                raw_text = response.choices[0].message.content or ""
+                self.messages.append({"role": "assistant", "content": raw_text})
+
+                # Parse tool calls from the text
+                tool_calls = self._parse_tool_calls_from_text(raw_text)
+
+                if not tool_calls:
+                    # No tool calls — this is the final response
+                    clean_text = self._strip_tool_calls_from_text(raw_text) or "Done."
+                    self.db.save_message(session_id=self.session_id, role='model', message=clean_text)
+                    return clean_text
+
+                # Execute each tool call and collect results
+                results_text_parts = []
+                for tc in tool_calls:
+                    func_name = tc.get("name", "")
+                    func_args = tc.get("arguments", {})
+
+                    if func_name in self.tool_functions:
+                        try:
+                            result = self.tool_functions[func_name](**func_args)
+                        except Exception as e:
+                            result = f"Error executing tool: {e}"
+                    else:
+                        result = f"Unknown tool: {func_name}"
+
+                    results_text_parts.append(f"[Tool Result for {func_name}]: {result}")
+
+                # Feed tool results back as a user message so the model can respond
+                tool_results_msg = "\n".join(results_text_parts)
+                self.messages.append({"role": "user", "content": f"Tool execution results:\n{tool_results_msg}\n\nNow provide a brief, friendly response to the user about what was done. Do NOT call any more tools unless necessary."})
+
+            # If we hit the max rounds, return the last response
+            clean = self._strip_tool_calls_from_text(raw_text) or "Done."
+            self.db.save_message(session_id=self.session_id, role='model', message=clean)
+            return clean
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "429" in error_str or "quota" in error_str or "exhausted" in error_str:
+                return f"I've hit my API rate limit. Please wait a moment before sending another request!\n[API Error Details]: {e}"
+            return f"Error communicating with brain: {e}"
+
+    def _process_input_cloud(self, user_text: str) -> str:
+        """Process input using cloud API providers (OpenRouter / Gemini) with native tool calling."""
         try:
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
             

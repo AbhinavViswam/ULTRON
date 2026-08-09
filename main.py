@@ -10,6 +10,9 @@ import queue
 import json
 from dotenv import load_dotenv
 
+is_processing = False
+stdout_lock = threading.Lock()
+
 def reminder_worker(db):
     """Background thread to check for pending reminders and show a popup."""
     while True:
@@ -36,13 +39,11 @@ from ultron.listener import VoiceListener
 from ultron.cron_manager import CronManager
 from ultron.output_manager import OutputManager
 
-def handle_user_query(user_text, brain, output_manager):
+def handle_user_query(user_text, brain, output_manager, was_queued=False):
     """Common handler for processing user queries from keyboard or microphone."""
+    global is_processing
     if not user_text or not user_text.strip():
         return
-
-    # Immediately stop speaking and clear pending cron messages
-    output_manager.interrupt()
 
     # If Ultron is asleep and command is not a wake command, stay completely silent
     if brain.is_asleep:
@@ -54,44 +55,42 @@ def handle_user_query(user_text, brain, output_manager):
         if not is_wake_cmd:
             return
 
-    LOADING_MESSAGES = [
-        "Let me look into it, sir...",
-        "Give me a minute, sir...",
-        "Give me a second, sir...",
-        "I am working on it, sir...",
-        "Please wait, sir...",
-        "I will let you know, sir...",
-        "Let me gather the information, sir..."
-    ]
+    if was_queued:
+        LOADING_MESSAGES = [
+            "Now for your next request...",
+            "Moving on to the next one...",
+            "Checking that next...",
+            "Let me check that too...",
+            "Working on your other request..."
+        ]
+    else:
+        LOADING_MESSAGES = [
+            "Hmm, let me see...",
+            "Just a second, sir...",
+            "Looking into that...",
+            "Right away, sir...",
+            "Let me check...",
+            "Working on it, sir..."
+        ]
+        
     msg = random.choice(LOADING_MESSAGES)
-    done = False
+    is_processing = True
 
     # Print and speak loading phrase
-    sys.stdout.write(f"\rUltron: {msg}  ")
-    sys.stdout.flush()
+    with stdout_lock:
+        sys.stdout.write(f"\rUltron: {msg}\n")
+        sys.stdout.flush()
     output_manager.enqueue(msg, source="system", print_msg=False)
-
-    def spin():
-        spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
-        while not done:
-            sys.stdout.write(f"\b{next(spinner)}")
-            sys.stdout.flush()
-            time.sleep(0.1)
-
-    spinner_thread = threading.Thread(target=spin)
-    spinner_thread.start()
 
     try:
         response = brain.process_input(user_text)
     finally:
-        done = True
-        spinner_thread.join()
-        clear_len = len(msg) + 12
-        sys.stdout.write('\b' * clear_len + ' ' * clear_len + '\b' * clear_len)
-        sys.stdout.flush()
+        is_processing = False
 
     if response:
-        output_manager.enqueue(response, source="user")
+        with stdout_lock:
+            print(f"Ultron: {response}")
+        output_manager.enqueue(response, source="user", print_msg=False)
 
 def main():
     print("Initializing Ultron Desktop Assistant...")
@@ -122,7 +121,15 @@ def main():
         if mic_active:
             # Callback function triggered when voice is detected by microphone
             def on_voice_detected(spoken_text):
-                command_queue.put(('voice', spoken_text))
+                global is_processing
+                was_queued = is_processing
+                if was_queued:
+                    with stdout_lock:
+                        sys.stdout.write(f"\r[Queued Voice Task: \"{spoken_text}\"]\n")
+                        sys.stdout.flush()
+                else:
+                    output_manager.interrupt()
+                command_queue.put(('voice', spoken_text, was_queued))
                 
             listener = VoiceListener(callback_func=on_voice_detected)
             listener.start_listening()
@@ -137,13 +144,21 @@ def main():
 
         # Start background keyboard reader thread
         def keyboard_worker():
+            global is_processing
             while True:
                 try:
                     text = sys.stdin.readline()
                     if text:
                         text_str = text.strip()
                         if text_str:
-                            command_queue.put(('keyboard', text_str))
+                            was_queued = is_processing
+                            if was_queued:
+                                with stdout_lock:
+                                    sys.stdout.write(f"\r[Queued Keyboard Task: \"{text_str}\"]\n")
+                                    sys.stdout.flush()
+                            else:
+                                output_manager.interrupt()
+                            command_queue.put(('keyboard', text_str, was_queued))
                 except Exception:
                     break
 
@@ -163,23 +178,32 @@ def main():
     
     welcome_msg = "Hello, welcome sir! How can I assist you today?"
     output_manager.enqueue(welcome_msg, source="system")
+    time.sleep(0.5)  # Let the welcome message print before showing the "You:" prompt
     
     while True:
         try:
-            sys.stdout.write("\nYou: ")
-            sys.stdout.flush()
+            with stdout_lock:
+                sys.stdout.write("\nYou: ")
+                sys.stdout.flush()
             
-            source, user_input = command_queue.get()
+            queue_item = command_queue.get()
+            if len(queue_item) == 3:
+                source, user_input, was_queued = queue_item
+            else:
+                source, user_input = queue_item
+                was_queued = False
             
             if user_input.lower().strip() in ['exit', 'quit']:
-                print("\nUltron: Goodbye! Shutting down.")
+                with stdout_lock:
+                    print("\nUltron: Goodbye! Shutting down.")
                 break
                 
             if source == 'voice':
-                sys.stdout.write(f"\rYou (Voice): {user_input}\n")
-                sys.stdout.flush()
+                with stdout_lock:
+                    sys.stdout.write(f"\rYou (Voice): {user_input}\n")
+                    sys.stdout.flush()
             
-            handle_user_query(user_input, brain, output_manager)
+            handle_user_query(user_input, brain, output_manager, was_queued)
             
         except KeyboardInterrupt:
             print("\n\nUltron: Interrupted by user. Goodbye!")

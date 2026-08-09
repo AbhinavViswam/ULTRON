@@ -25,7 +25,7 @@ import html
 # ---------------------------------------------------------------------------
 
 def web_search(query: str, max_results: int = 6) -> str:
-    """Searches the web using DuckDuckGo and returns a list of result titles and URLs.
+    """Searches the web using DuckDuckGo and returns a list of result titles, URLs, and snippets.
     Use this as the FIRST step of any research task to discover relevant pages.
     Args:
         query: The search query string.
@@ -33,7 +33,7 @@ def web_search(query: str, max_results: int = 6) -> str:
     """
     try:
         encoded_query = urllib.parse.quote_plus(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+        url = f"https://lite.duckduckgo.com/lite/?q={encoded_query}"
 
         req = urllib.request.Request(
             url,
@@ -48,15 +48,19 @@ def web_search(query: str, max_results: int = 6) -> str:
         with urllib.request.urlopen(req, timeout=12) as resp:
             body = resp.read().decode("utf-8", errors="replace")
 
-        # Parse result links from DuckDuckGo HTML
-        link_pattern = re.compile(
-            r'<a[^>]+class=["\']result__a["\'][^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
-            re.IGNORECASE | re.DOTALL
-        )
+        if "Unfortunately, bots use DuckDuckGo too" in body or "captcha" in body.lower():
+            return "Web search blocked by CAPTCHA."
+
+        # Parse result links and snippets from DuckDuckGo Lite HTML
+        links = re.findall(r'<a[^>]+href=[\'\"]([^\'\"]+)[\'\"][^>]*class=[\'\"]result-link[\'\"][^>]*>(.*?)</a>|<a[^>]+class=[\'\"]result-link[\'\"][^>]*href=[\'\"]([^\'\"]+)[\'\"][^>]*>(.*?)</a>', body, re.IGNORECASE)
+        snippets = re.findall(r'<td[^>]*class=[\'\"]result-snippet[\'\"][^>]*>(.*?)</td>', body, re.IGNORECASE | re.DOTALL)
+
         results = []
-        for match in link_pattern.finditer(body):
-            raw_url = match.group(1)
-            raw_title = match.group(2)
+        for i in range(min(max_results, len(links), len(snippets))):
+            match = links[i]
+            raw_url = match[0] or match[2]
+            raw_title = match[1] or match[3]
+            raw_snippet = snippets[i]
 
             # DuckDuckGo sometimes uses redirect URLs — extract the actual target
             if "uddg=" in raw_url:
@@ -69,17 +73,17 @@ def web_search(query: str, max_results: int = 6) -> str:
                     pass
 
             title = html.unescape(re.sub(r"<[^>]+>", "", raw_title)).strip()
+            snippet = html.unescape(re.sub(r"<[^>]+>", "", raw_snippet)).strip()
+            
             if title and raw_url.startswith("http"):
-                results.append({"title": title, "url": raw_url})
-                if len(results) >= max_results:
-                    break
+                results.append({"title": title, "url": raw_url, "snippet": snippet})
 
         if not results:
             return f"No search results found for: {query}"
 
         lines = [f"Search results for: '{query}'\n"]
         for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']}\n   URL: {r['url']}")
+            lines.append(f"{i}. {r['title']}\n   Snippet: {r['snippet']}\n   URL: {r['url']}")
         return "\n".join(lines)
 
     except Exception as e:
