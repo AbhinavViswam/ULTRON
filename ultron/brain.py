@@ -13,7 +13,8 @@ from ultron.automation import (
     search_spotify, adjust_volume, take_screenshot, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
-    empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder
+    empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
+    copy_file, move_file
 )
 from ultron.plugins.explorer_plugin import get_selected_file_in_explorer
 from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
@@ -274,6 +275,8 @@ class Brain:
             "read_file_content": read_file_content,
             "create_file": create_file,
             "delete_file": delete_file,
+            "copy_file": copy_file,
+            "move_file": move_file,
             "list_directory": list_directory,
             "empty_recycle_bin": empty_recycle_bin,
             "clean_temp_files": clean_temp_files,
@@ -388,7 +391,7 @@ You have full interactive control over a web browser.
 - WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
-- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
+- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
 - SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
 - READING DOCUMENTS: Use `read_document` to read PDF and Word (DOCX) files. If the file is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.

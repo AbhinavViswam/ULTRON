@@ -878,3 +878,29 @@ def open_folder(path: str) -> str:
         return f"Successfully opened folder: '{target_path}'"
     except Exception as e:
         return f"Failed to open folder: {e}"
+
+def copy_file(source_path: str, destination_path: str) -> str:
+    """Copies a file or directory from source_path to destination_path."""
+    try:
+        import shutil
+        if not os.path.exists(source_path):
+            return f"Source path does not exist: '{source_path}'"
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
+            return f"Successfully copied directory to '{destination_path}'"
+        else:
+            shutil.copy2(source_path, destination_path)
+            return f"Successfully copied file to '{destination_path}'"
+    except Exception as e:
+        return f"Failed to copy: {e}"
+
+def move_file(source_path: str, destination_path: str) -> str:
+    """Moves a file or directory from source_path to destination_path."""
+    try:
+        import shutil
+        if not os.path.exists(source_path):
+            return f"Source path does not exist: '{source_path}'"
+        shutil.move(source_path, destination_path)
+        return f"Successfully moved to '{destination_path}'"
+    except Exception as e:
+        return f"Failed to move: {e}"
