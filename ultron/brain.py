@@ -15,6 +15,7 @@ from ultron.automation import (
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder
 )
+from ultron.plugins.explorer_plugin import get_selected_file_in_explorer
 from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
 from ultron.plugins.docker_plugin import (
     docker_list_containers, docker_list_images, docker_start_container,
@@ -30,6 +31,7 @@ from ultron.plugins.screen_plugin import (
     screen_capture, screen_analyze, screen_find, screen_get_resolution,
     screen_get_active_window, screen_get_mouse_position
 )
+from ultron.plugins.document_plugin import read_document
 
 class ToolBridge:
     """Helper to convert Python functions to OpenAI JSON schemas."""
@@ -93,6 +95,7 @@ class Brain:
         self.active_api = active_api
         self.db = Database()
         self.browser = BrowserManager()
+        self.truth_mode = settings.get("truth_mode", False)
         
         if active_api == "openrouterapi":
             api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("API_KEY")
@@ -141,6 +144,13 @@ class Brain:
             scheduled_for = (datetime.datetime.now() + datetime.timedelta(seconds=delay_seconds)).isoformat()
             self.db.add_task(description, scheduled_for)
             return f"Reminder successfully set to trigger in {delay_seconds} seconds."
+
+        def set_recurring_reminder(description: str, start_delay_seconds: int, frequency: str, until_date_iso: str = None) -> str:
+            """Sets a recurring reminder. frequency must be 'hourly', 'daily', 'weekly', or 'monthly'."""
+            import datetime
+            scheduled_for = (datetime.datetime.now() + datetime.timedelta(seconds=start_delay_seconds)).isoformat()
+            self.db.add_task(description, scheduled_for, frequency, until_date_iso)
+            return f"Recurring reminder '{frequency}' successfully set to trigger first in {start_delay_seconds} seconds."
 
         def search_memories(query: str) -> str:
             """Searches for relevant memories. Call this when you need to recall a fact about the user."""
@@ -288,13 +298,16 @@ class Brain:
             "list_workflows": list_workflows,
             "delete_workflow": delete_workflow,
             "set_reminder": set_reminder,
+            "set_recurring_reminder": set_recurring_reminder,
+            "get_selected_file_in_explorer": get_selected_file_in_explorer,
             "screen_capture": screen_capture,
             "screen_analyze": screen_analyze,
             "screen_find": screen_find,
             "screen_get_resolution": screen_get_resolution,
             "screen_get_active_window": screen_get_active_window,
             "screen_get_mouse_position": screen_get_mouse_position,
-            "open_folder": open_folder
+            "open_folder": open_folder,
+            "read_document": read_document
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -304,9 +317,9 @@ class Brain:
         
         # Build system prompt — for local models, embed tool descriptions directly
         if self.active_api == "localapi":
-            sys_instruct = self._build_local_system_prompt(now_str)
+            sys_instruct = self._build_local_system_prompt(now_str, self.truth_mode)
         else:
-            sys_instruct = self._build_cloud_system_prompt(now_str)
+            sys_instruct = self._build_cloud_system_prompt(now_str, self.truth_mode)
         
         # Initialize conversation history
         self.messages = [{"role": "system", "content": sys_instruct}]
@@ -314,9 +327,26 @@ class Brain:
         
         print("Ultron's Brain initialized and ready.")
 
-    def _build_cloud_system_prompt(self, now_str: str) -> str:
+    def _get_truth_mode_instructions(self) -> str:
+        return """# TRUTH MODE INSTRUCTIONS
+You are currently operating in TRUTH MODE. You must strictly adhere to the following rules:
+- ❌ Don't blindly agree with the user.
+- ❌ Don't praise bad ideas.
+- ❌ Don't say "that's a great idea" unless it genuinely is.
+- ✅ Tell the user when they're wrong.
+- ✅ Explain why they're wrong.
+- ✅ Challenge assumptions.
+- ✅ Give counterarguments.
+- ✅ Point out risks the user hasn't considered.
+- ✅ Separate facts from opinions.
+- ✅ Say "I don't know" when uncertain.
+- ✅ If a plan is inefficient, suggest a better approach.
+- ✅ If the user is making an emotional decision, point that out.
+- ✅ Be respectful, but do NOT prioritize comfort over truth."""
+
+    def _build_cloud_system_prompt(self, now_str: str, truth_mode: bool = False) -> str:
         """Build the system prompt for cloud API providers (OpenRouter / Gemini)."""
-        return f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
+        prompt = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
 
 CURRENT SYSTEM TIME: {now_str}
 
@@ -359,6 +389,8 @@ You have full interactive control over a web browser.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
 - FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
+- SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
+- READING DOCUMENTS: Use `read_document` to read PDF and Word (DOCX) files. If the file is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
 - DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
@@ -381,6 +413,9 @@ When the user asks you to research a topic, investigate something, or look into 
 - RUN: When the user asks to "start", "run", or "execute" a workflow by name, use `run_workflow`.
 - LIST: When the user asks to see or show their workflows, use `list_workflows`.
 - DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`."""
+        if truth_mode:
+            prompt += "\n\n" + self._get_truth_mode_instructions()
+        return prompt
 
     def _build_local_tools_prompt(self) -> str:
         """Build a compact text-based tool listing for embedding into a local model's system prompt."""
@@ -401,7 +436,7 @@ When the user asks you to research a topic, investigate something, or look into 
             lines.append(f"- {name}({params_str}): {doc}")
         return "\n".join(lines)
 
-    def _build_local_system_prompt(self, now_str: str) -> str:
+    def _build_local_system_prompt(self, now_str: str, truth_mode: bool = False) -> str:
         """Build the system prompt for LOCAL models with embedded tool descriptions.
         
         Since local models don't support the OpenAI tool-calling API, we embed all tool
@@ -409,7 +444,7 @@ When the user asks you to research a topic, investigate something, or look into 
         JSON block when it wants to call a tool.
         """
         tools_text = self._build_local_tools_prompt()
-        return f"""You are Ultron, an advanced, highly intelligent desktop AI assistant running on a Windows PC.
+        prompt = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant running on a Windows PC.
 
 CURRENT SYSTEM TIME: {now_str}
 
@@ -459,6 +494,7 @@ Your response: Let me take a look at your screen, sir.
 - If you need to find where something is on screen, use `screen_find`.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - To open file system folders like Downloads or Desktop, use `open_folder`.
+- To read PDF and Word (DOCX) files, use `read_document`. For long files, provide a `page` number.
 
 # RULES FOR TOOL CALLING
 - NEVER output raw Python code, bash commands, or explain how to call a function.
@@ -469,6 +505,9 @@ Your response: Let me take a look at your screen, sir.
 - For destructive actions (delete_file, empty_recycle_bin), ask for confirmation first before calling the tool.
 - To remember facts, use save_memory. To recall facts about the user, use search_memories FIRST.
 - To set time-based reminders, calculate the delay in seconds and use the set_reminder tool with delay_seconds."""
+        if truth_mode:
+            prompt += "\n\n" + self._get_truth_mode_instructions()
+        return prompt
 
     def _parse_tool_calls_from_text(self, text: str) -> list:
         """Parse <tool_call>...</tool_call> blocks from model text output.

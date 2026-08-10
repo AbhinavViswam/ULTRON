@@ -1,16 +1,17 @@
 {
   "openrouterapi": false,
-  "geminiapi": false,
-  "localapi": true,
+  "geminiapi": true,
+  "localapi": false,
   "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "gemini_model": "gemini-3.5-flash",
   "local_model": "gemma4:e2b",
-  "microphone_active": false,
+  "microphone_active": true,
   "cron_jobs": {
     "unread_emails_check": {
       "enabled": false,
       "interval_seconds": 3600,
       "notify_popup": false
     }
-  }
+  },
+  "truth_mode": true
 }

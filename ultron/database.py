@@ -60,9 +60,19 @@ class Database:
                     description TEXT NOT NULL,
                     status TEXT DEFAULT 'pending',
                     scheduled_for DATETIME,
+                    frequency TEXT DEFAULT NULL,
+                    until_date DATETIME DEFAULT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # Check for existing tasks to migrate frequency and until_date
+            cursor.execute("PRAGMA table_info(tasks)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'frequency' not in columns:
+                cursor.execute("ALTER TABLE tasks ADD COLUMN frequency TEXT DEFAULT NULL")
+            if 'until_date' not in columns:
+                cursor.execute("ALTER TABLE tasks ADD COLUMN until_date DATETIME DEFAULT NULL")
             conn.commit()
 
     def save_message(self, session_id: str, role: str, message: str):
@@ -87,14 +97,14 @@ class Database:
                 ids=[doc_id]
             )
 
-    def add_task(self, description: str, scheduled_for: str = None):
+    def add_task(self, description: str, scheduled_for: str = None, frequency: str = None, until_date: str = None):
         """Add a new task for scheduling."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO tasks (description, scheduled_for)
-                VALUES (?, ?)
-            ''', (description, scheduled_for))
+                INSERT INTO tasks (description, scheduled_for, frequency, until_date)
+                VALUES (?, ?, ?, ?)
+            ''', (description, scheduled_for, frequency, until_date))
             conn.commit()
 
     def get_pending_tasks(self):
@@ -102,11 +112,22 @@ class Database:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT id, description, scheduled_for, created_at 
+                SELECT id, description, scheduled_for, created_at, frequency, until_date
                 FROM tasks 
                 WHERE status = 'pending'
             ''')
             return cursor.fetchall()
+            
+    def update_task_time(self, task_id: int, new_scheduled_for: str):
+        """Update the scheduled time for a recurring task."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE tasks 
+                SET scheduled_for = ? 
+                WHERE id = ?
+            ''', (new_scheduled_for, task_id))
+            conn.commit()
             
     def update_task_status(self, task_id: int, status: str):
         """Update the status of a specific task (e.g., 'completed')."""

@@ -21,15 +21,42 @@ def reminder_worker(db, output_manager):
             tasks = db.get_pending_tasks()
             now_iso = datetime.datetime.now().isoformat()
             for task in tasks:
-                task_id, desc, scheduled_for, created = task
+                # Handle old schema (4 columns) or new schema (6 columns)
+                if len(task) == 4:
+                    task_id, desc, scheduled_for, created = task
+                    frequency = None
+                    until_date = None
+                else:
+                    task_id, desc, scheduled_for, created, frequency, until_date = task
+                    
                 if scheduled_for and scheduled_for <= now_iso:
-                    # Delete the task from the database so it doesn't clutter
-                    db.delete_task(task_id)
                     # Trigger visual toast
                     send_toast("Ultron Reminder", desc)
                     # Trigger high-priority audio interruption
                     if output_manager:
                         output_manager.enqueue(f"Sir, here is your reminder: {desc}", source="system")
+                        
+                    # Handle recurrence
+                    if frequency:
+                        now_dt = datetime.datetime.now()
+                        if frequency == 'hourly':
+                            next_dt = now_dt + datetime.timedelta(hours=1)
+                        elif frequency == 'daily':
+                            next_dt = now_dt + datetime.timedelta(days=1)
+                        elif frequency == 'weekly':
+                            next_dt = now_dt + datetime.timedelta(weeks=1)
+                        elif frequency == 'monthly':
+                            next_dt = now_dt + datetime.timedelta(days=30)
+                        else:
+                            next_dt = now_dt + datetime.timedelta(days=1) # Default to daily if unrecognized
+                            
+                        next_iso = next_dt.isoformat()
+                        if until_date and next_iso > until_date:
+                            db.delete_task(task_id)
+                        else:
+                            db.update_task_time(task_id, next_iso)
+                    else:
+                        db.delete_task(task_id)
         except Exception as e:
             print(f"[Reminder Error] {e}")
         time.sleep(15) # Check every 15 seconds
