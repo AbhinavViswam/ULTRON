@@ -1,19 +1,24 @@
 import os
 
 def read_document(file_path: str, page: int = None) -> str:
-    """Reads a PDF or DOCX file. If the document is long, you MUST provide a page number (1-indexed) to read it piece by piece."""
+    """Reads a PDF, DOCX, or image file. For images (PNG, JPG, BMP, TIFF, WEBP), extracts text using OCR.
+    If the document is long, you MUST provide a page number (1-indexed) to read it piece by piece."""
     if not os.path.exists(file_path):
         return f"Error: File '{file_path}' not found."
 
     ext = os.path.splitext(file_path)[1].lower()
+
+    _image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
     try:
         if ext == ".pdf":
             return _read_pdf(file_path, page)
         elif ext == ".docx":
             return _read_docx(file_path, page)
+        elif ext in _image_exts:
+            return _read_image(file_path)
         else:
-            return f"Error: Unsupported file format '{ext}'. Only .pdf and .docx are supported."
+            return f"Error: Unsupported file format '{ext}'. Supported: .pdf, .docx, .png, .jpg, .jpeg, .bmp, .tiff, .webp"
     except Exception as e:
         return f"Error reading document: {e}"
 
@@ -83,3 +88,19 @@ def _read_docx(file_path: str, page: int = None) -> str:
             # Document is too long, return pagination summary
             return (f"The DOCX document '{os.path.basename(file_path)}' is long (divided into {num_chunks} chunks). "
                     f"To read it, please call the tool again and provide a specific page number, e.g., page=1.")
+
+def _read_image(file_path: str) -> str:
+    """Extract text from an image file using Tesseract OCR."""
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError:
+        return "Error: pytesseract or Pillow is not installed. Please run: pip install pytesseract pillow"
+
+    img = Image.open(file_path)
+    text = pytesseract.image_to_string(img)
+
+    if not text.strip():
+        return f"No text detected in image '{os.path.basename(file_path)}'."
+
+    return f"--- Text extracted from '{os.path.basename(file_path)}' ---\n\n{text.strip()}"

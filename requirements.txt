@@ -21,3 +21,6 @@ chromadb
 pypdf
 python-docx
 pywin32
+uiautomation
+mss
+pytesseract

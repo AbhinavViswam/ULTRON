@@ -207,7 +207,7 @@ def main():
         print("\nUltron is online. Background microphone is inactive (keyboard input only). Type 'exit' or 'quit' to stop.")
     print("-" * 50)
     
-    welcome_msg = "Hello, welcome sir! How can I assist you today?"
+    welcome_msg = "Hello, Ultron welcomes you sir"
     output_manager.enqueue(welcome_msg, source="system")
     time.sleep(0.5)  # Let the welcome message print before showing the "You:" prompt
     

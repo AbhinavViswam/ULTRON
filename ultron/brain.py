@@ -29,7 +29,8 @@ from ultron.plugins.workflow_plugin import (
     create_workflow, run_workflow, list_workflows, delete_workflow
 )
 from ultron.plugins.screen_plugin import (
-    screen_capture, screen_analyze, screen_find, screen_get_resolution,
+    screen_read, screen_read_detailed, screen_capture, screen_read_ocr,
+    screen_find, screen_get_resolution,
     screen_get_active_window, screen_get_mouse_position
 )
 from ultron.plugins.document_plugin import read_document
@@ -303,8 +304,10 @@ class Brain:
             "set_reminder": set_reminder,
             "set_recurring_reminder": set_recurring_reminder,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
+            "screen_read": screen_read,
+            "screen_read_detailed": screen_read_detailed,
             "screen_capture": screen_capture,
-            "screen_analyze": screen_analyze,
+            "screen_read_ocr": screen_read_ocr,
             "screen_find": screen_find,
             "screen_get_resolution": screen_get_resolution,
             "screen_get_active_window": screen_get_active_window,
@@ -383,7 +386,10 @@ You have full interactive control over a web browser.
 - TO ADJUST VOLUME: Use `adjust_volume` with action 'volume_up', 'volume_down', or 'mute'.
 
 # SCREEN AWARENESS
-- If the user asks "what is on my screen" or asks about a visual element, use `screen_capture`. This permanently saves a screenshot to the screenshots folder and returns the image data to you for analysis.
+- PRIMARY: If the user asks "what is on my screen", "what do you see", or asks about a visible element, use `screen_read`. This is fast and returns a text summary of all visible UI controls and text. It works with any model (no vision needed). You can pass a `window_title` to read a specific window even if it is not focused.
+- DETAILED: Use `screen_read_detailed` when you need precise layout info (bounding boxes, control types, enabled states) — e.g., for automation or describing exact UI positions.
+- SCREENSHOT: Use `screen_capture` only when the user explicitly asks for a screenshot, or when you need to visually analyze something (images, colors, layout). This saves a screenshot and returns base64 image data.
+- OCR FALLBACK: Use `screen_read_ocr` for canvas, game, or custom-drawn UI content that `screen_read` cannot detect. You can specify a screen region (left, top, right, bottom) or read the full screen.
 - If you need to find where something is on screen, use `screen_find`.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - TO SEARCH MUSIC: Use the `search_spotify` tool to open it directly in the Spotify app.
@@ -393,7 +399,7 @@ You have full interactive control over a web browser.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
 - FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
 - SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
-- READING DOCUMENTS: Use `read_document` to read PDF and Word (DOCX) files. If the file is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
+- READING DOCUMENTS: Use `read_document` to read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP). For images, it extracts text using OCR. If a PDF/DOCX is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
 - DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
@@ -489,15 +495,18 @@ Your response: Right away, sir.
 User: "What is on my screen right now?"
 Your response: Let me take a look at your screen, sir.
 <tool_call>
-{{"name": "screen_capture", "arguments": {{}}}}
+{{"name": "screen_read", "arguments": {{}}}}
 </tool_call>
 
 # SCREEN AWARENESS
-- If the user asks "what is on my screen" or asks about a visual element, use `screen_capture`. This permanently saves a screenshot and returns the image data to you.
-- If you need to find where something is on screen, use `screen_find`.
+- PRIMARY: If the user asks "what is on my screen", use `screen_read`. This is the fastest method — it reads all visible UI controls and text without taking a screenshot. Pass `window_title` to read a specific window.
+- DETAILED: Use `screen_read_detailed` for precise layout info (bounding boxes, element positions).
+- SCREENSHOT: Use `screen_capture` only when the user explicitly asks for a screenshot or visual analysis is needed.
+- OCR FALLBACK: Use `screen_read_ocr` for canvas, game, or custom-drawn UI that `screen_read` cannot detect.
+- To find where something is on screen, use `screen_find`.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - To open file system folders like Downloads or Desktop, use `open_folder`.
-- To read PDF and Word (DOCX) files, use `read_document`. For long files, provide a `page` number.
+- To read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP), use `read_document`. For images, it extracts text using OCR. For long PDF/DOCX files, provide a `page` number.
 
 # RULES FOR TOOL CALLING
 - NEVER output raw Python code, bash commands, or explain how to call a function.
@@ -706,12 +715,14 @@ Your response: Let me take a look at your screen, sir.
     def _process_input_cloud(self, user_text: str) -> str:
         """Process input using cloud API providers (OpenRouter / Gemini) with native tool calling."""
         try:
+            import time as _time
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
             
             # Append user message
             self.messages.append({"role": "user", "content": user_text})
             
             # Initial API call with retries
+            t0 = _time.monotonic()
             for attempt in range(3):
                 try:
                     response = self.client.chat.completions.create(
@@ -726,8 +737,9 @@ Your response: Let me take a look at your screen, sir.
                 except Exception as e:
                     if attempt == 2:
                         raise e
-                    import time
-                    time.sleep(2)
+                    _time.sleep(2)
+            
+            print(f"[Timing] Model API call #1: {_time.monotonic() - t0:.1f}s")
             
             if not response or not response.choices:
                 return "The AI model server returned an empty response. Please try again in a few seconds!"
@@ -735,7 +747,9 @@ Your response: Let me take a look at your screen, sir.
             response_message = response.choices[0].message
             
             # Keep looping as long as the model wants to call tools
+            tool_round = 0
             while response_message.tool_calls:
+                tool_round += 1
                 # Convert message to dict format for safe history tracking (exclude_none=True for Gemini compatibility)
                 self.messages.append(response_message.model_dump(exclude_none=True))
                 
@@ -747,6 +761,7 @@ Your response: Let me take a look at your screen, sir.
                     except json.JSONDecodeError:
                         function_args = {}
                         
+                    t1 = _time.monotonic()
                     if function_name in self.tool_functions:
                         function_to_call = self.tool_functions[function_name]
                         try:
@@ -756,6 +771,8 @@ Your response: Let me take a look at your screen, sir.
                             function_response = f"Error executing tool: {e}"
                     else:
                         function_response = f"Unknown tool: {function_name}"
+                    
+                    print(f"[Timing] Tool '{function_name}' executed in {_time.monotonic() - t1:.1f}s")
                         
                     # Append the tool's result to the history
                     self.messages.append({
@@ -766,6 +783,7 @@ Your response: Let me take a look at your screen, sir.
                     })
                 
                 # Call the model again with the newly added tool results (with retries)
+                t2 = _time.monotonic()
                 for attempt in range(3):
                     try:
                         response = self.client.chat.completions.create(
@@ -780,8 +798,9 @@ Your response: Let me take a look at your screen, sir.
                     except Exception as e:
                         if attempt == 2:
                             raise e
-                        import time
-                        time.sleep(2)
+                        _time.sleep(2)
+                
+                print(f"[Timing] Model API call #{tool_round + 1}: {_time.monotonic() - t2:.1f}s")
                 
                 if not response or not response.choices:
                     return "The AI model server returned an empty response during tool execution."
