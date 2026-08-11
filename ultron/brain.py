@@ -4,7 +4,6 @@ import uuid
 import datetime
 import inspect
 import json
-from dotenv import load_dotenv
 from openai import OpenAI
 
 from ultron.database import Database
@@ -34,6 +33,10 @@ from ultron.plugins.screen_plugin import (
     screen_get_active_window, screen_get_mouse_position
 )
 from ultron.plugins.document_plugin import read_document
+from ultron.plugins.agent_monitor_plugin import (
+    agent_monitor_start, agent_monitor_stop, agent_monitor_status,
+    agent_monitor_configure, install_agent_hooks
+)
 
 class ToolBridge:
     """Helper to convert Python functions to OpenAI JSON schemas."""
@@ -73,9 +76,7 @@ class Brain:
     def __init__(self):
         self.session_id = str(uuid.uuid4())
         
-        # Ensure the latest .env file variables are loaded with override
-        load_dotenv(override=True)
-        
+                
         # Load Settings
         settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
         try:
@@ -83,6 +84,14 @@ class Brain:
                 settings = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             settings = {"openrouterapi": True, "geminiapi": False}
+            
+        # Load API Keys
+        keys_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "keys.json")
+        try:
+            with open(keys_path, "r") as f:
+                api_keys = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            api_keys = {}
             
         # Select the first API set to true
         active_api = None
@@ -100,9 +109,9 @@ class Brain:
         self.truth_mode = settings.get("truth_mode", False)
         
         if active_api == "openrouterapi":
-            api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("API_KEY")
+            api_key = api_keys.get("openrouter")
             if not api_key:
-                raise ValueError("OPENROUTER_API_KEY or API_KEY is not set correctly in the .env file.")
+                raise ValueError("openrouter API key is not set correctly in keys.json.")
                 
             self.client = OpenAI(
                 base_url="https://openrouter.ai/api/v1",
@@ -112,9 +121,9 @@ class Brain:
             print("\nUltron AI Provider: OpenRouter Mode")
             
         elif active_api == "geminiapi":
-            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+            api_key = api_keys.get("google")
             if not api_key:
-                raise ValueError("GEMINI_API_KEY or API_KEY is not set correctly in the .env file.")
+                raise ValueError("google API key is not set correctly in keys.json.")
                 
             self.client = OpenAI(
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -125,7 +134,7 @@ class Brain:
         elif active_api == "localapi":
             self.client = OpenAI(
                 base_url=settings.get("local_api_url", "http://localhost:11434/v1"),
-                api_key=os.getenv("LOCAL_API_KEY", "ollama"),
+                api_key="ollama",
             )
             self.selected_model = settings.get("local_model") or settings.get("model") or "gemma4:e2b"
             print("\nUltron AI Provider: Local Mode")
@@ -154,6 +163,21 @@ class Brain:
             self.db.add_task(description, scheduled_for, frequency, until_date_iso)
             return f"Recurring reminder '{frequency}' successfully set to trigger first in {start_delay_seconds} seconds."
 
+        def list_reminders() -> str:
+            """Lists all pending reminders. Use this when the user asks to see, show, or list their reminders."""
+            tasks = self.db.get_pending_tasks()
+            if not tasks:
+                return "No pending reminders found."
+            lines = []
+            for task in tasks:
+                if len(task) == 4:
+                    task_id, desc, scheduled_for, created = task
+                    frequency = None
+                else:
+                    task_id, desc, scheduled_for, created, frequency, until_date = task
+                freq_str = f" (repeats {frequency})" if frequency else ""
+                lines.append(f"- [{task_id}] \"{desc}\" — scheduled for {scheduled_for}{freq_str}")
+            return f"Pending reminders ({len(tasks)}):\n" + "\n".join(lines)
         def search_memories(query: str) -> str:
             """Searches for relevant memories. Call this when you need to recall a fact about the user."""
             results = self.db.search_memories(query)
@@ -303,6 +327,7 @@ class Brain:
             "delete_workflow": delete_workflow,
             "set_reminder": set_reminder,
             "set_recurring_reminder": set_recurring_reminder,
+            "list_reminders": list_reminders,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
             "screen_read": screen_read,
             "screen_read_detailed": screen_read_detailed,
@@ -313,7 +338,12 @@ class Brain:
             "screen_get_active_window": screen_get_active_window,
             "screen_get_mouse_position": screen_get_mouse_position,
             "open_folder": open_folder,
-            "read_document": read_document
+            "read_document": read_document,
+            "agent_monitor_start": agent_monitor_start,
+            "agent_monitor_stop": agent_monitor_stop,
+            "agent_monitor_status": agent_monitor_status,
+            "agent_monitor_configure": agent_monitor_configure,
+            "install_agent_hooks": install_agent_hooks
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -421,7 +451,14 @@ When the user asks you to research a topic, investigate something, or look into 
   For multi-arg tools, separate arguments with a pipe '|' character (e.g., "browser_type_text Search|React Server Components").
 - RUN: When the user asks to "start", "run", or "execute" a workflow by name, use `run_workflow`.
 - LIST: When the user asks to see or show their workflows, use `list_workflows`.
-- DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`."""
+- DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`.
+
+# AGENT MONITOR
+You can watch the user's coding agents (Claude Code in VSCode, Antigravity, etc.) and alert them when an agent stops, finishes, or asks a question.
+- START/STOP: Use `agent_monitor_start` and `agent_monitor_stop` when the user asks to watch or stop watching their agents.
+- STATUS: If the user asks "is Claude done?", "what are my agents doing?", or "is anything waiting on me?", use `agent_monitor_status`.
+- ALERT STYLE: If the user wants alerts quieter or louder, use `agent_monitor_configure` with 'toast', 'voice', or 'both'.
+- SETUP: `install_agent_hooks` installs the global Claude Code hooks so every session on the machine reports in. This only needs to run once — tell the user to restart their Claude Code sessions afterwards."""
         if truth_mode:
             prompt += "\n\n" + self._get_truth_mode_instructions()
         return prompt
@@ -507,6 +544,12 @@ Your response: Let me take a look at your screen, sir.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - To open file system folders like Downloads or Desktop, use `open_folder`.
 - To read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP), use `read_document`. For images, it extracts text using OCR. For long PDF/DOCX files, provide a `page` number.
+
+# AGENT MONITOR
+- If the user asks "is Claude done?", "what are my agents doing?", or "is anything waiting on me?", use `agent_monitor_status`.
+- Use `agent_monitor_start` / `agent_monitor_stop` to turn agent watching on or off.
+- Use `agent_monitor_configure` with 'toast', 'voice', or 'both' to change how alerts are delivered.
+- Use `install_agent_hooks` only when the user asks to set up or install agent monitoring globally.
 
 # RULES FOR TOOL CALLING
 - NEVER output raw Python code, bash commands, or explain how to call a function.

@@ -10,24 +10,30 @@ Make sure you have Python 3.10+ installed. Then, install the required packages:
 pip install -r requirements.txt
 ```
 
-### 2. Configure Your Settings & API Provider (`settings.json` & `.env`)
-Ultron features a dynamic configuration system via [`settings.json`](file:///c:/Users/dilsh/OneDrive/Desktop/PROJECT-2/settings.json).
+### 2. Configure Your Settings & API Keys
 
-#### Step A: Set up API Keys in `.env`
-Create a `.env` file in the root directory:
-```env
-OPENROUTER_API_KEY=your_openrouter_key_here
-GEMINI_API_KEY=your_gemini_api_key_here
+Ultron features a dynamic configuration system via `settings.json` and a separate `keys.json` file for your secure API keys.
+
+#### Step A: Set up API Keys in `keys.json`
+Create a `keys.json` file in the root directory and paste the following:
+```json
+{
+  "openrouter": "your_openrouter_key_here",
+  "google": "your_gemini_api_key_here"
+}
 ```
 
 #### Step B: Configure [`settings.json`](file:///c:/Users/dilsh/OneDrive/Desktop/PROJECT-2/settings.json)
-Customize your AI provider, model selection, microphone mode, and background cron jobs:
+Customize your AI provider, model selection, microphone mode, and background cron jobs in [`settings.json`](file:///c:/Users/dilsh/OneDrive/Desktop/PROJECT-2/settings.json):
 ```json
 {
+
   "openrouterapi": false,
   "geminiapi": true,
+  "localapi": false,
   "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "gemini_model": "gemini-3.5-flash",
+  "local_model": "gemma4:e2b",
   "microphone_active": false,
   "cron_jobs": {
     "unread_emails_check": {
@@ -39,8 +45,8 @@ Customize your AI provider, model selection, microphone mode, and background cro
 }
 ```
 
-- **`openrouterapi` / `geminiapi`**: Set one to `true` to select your active AI provider.
-- **`gemini_model` / `openrouter_model`**: Choose the exact AI model you want to use.
+
+- **`openrouterapi` / `geminiapi` / `localapi`**: Set one to `true` to select your active AI provider.
 - **`microphone_active`**: Set to `true` for hands-free voice control or `false` for keyboard-only mode.
 - **`cron_jobs`**: Configure automated background scheduled tasks (e.g. hourly unread email checks).
 

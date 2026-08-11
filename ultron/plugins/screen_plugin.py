@@ -173,6 +173,29 @@ def _read_by_title(title_substring: str, max_depth: int = 8,
     found_flag = [False]
 
     def worker():
+        # UI Automation is COM-based, and COM must be initialized on every thread
+        # that touches it. Without this the whole walk fails immediately with
+        # "CoInitialize has not been called" and no window is ever found.
+        com_ready = False
+        try:
+            import ctypes
+            ctypes.windll.ole32.CoInitialize(None)
+            com_ready = True
+        except Exception as e:
+            print(f"[Screen Plugin] COM initialization failed: {e}")
+            return
+
+        try:
+            _walk_window()
+        finally:
+            if com_ready:
+                try:
+                    import ctypes
+                    ctypes.windll.ole32.CoUninitialize()
+                except Exception:
+                    pass
+
+    def _walk_window():
         # First try exact match
         win = auto.WindowControl(searchDepth=1, Name=title_substring)
         if not win.Exists(maxSearchSeconds=1):

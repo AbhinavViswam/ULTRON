@@ -8,7 +8,7 @@ import datetime
 import ctypes
 import queue
 import json
-from dotenv import load_dotenv
+
 
 is_processing = False
 stdout_lock = threading.Lock()
@@ -126,8 +126,7 @@ def handle_user_query(user_text, brain, output_manager, was_queued=False):
 def main():
     print("Initializing Ultron Desktop Assistant...")
     
-    # Load environment variables from .env file
-    load_dotenv()
+    
     
     try:
         # Initialize Brain, Voice Speaker, and OutputManager
@@ -169,6 +168,12 @@ def main():
         reminder_thread = threading.Thread(target=reminder_worker, args=(brain.db, output_manager), daemon=True)
         reminder_thread.start()
 
+        # Start the agent monitor (watches Claude Code / Antigravity sessions)
+        from ultron.plugins.agent_monitor_plugin import get_monitor
+        agent_monitor = get_monitor(output_manager=output_manager)
+        if settings.get("agent_monitor", {}).get("enabled", True):
+            print(f"[AgentMonitor] {agent_monitor.start()}")
+
         # Start the background Cron Manager (with output_manager for queued speech)
         cron_manager = CronManager(brain=brain, output_manager=output_manager)
         cron_manager.start()
@@ -198,7 +203,7 @@ def main():
 
     except ValueError as e:
         print(f"\n[ERROR] {e}")
-        print("Please check your .env and settings.json files for correct API configuration.")
+        print("Please check your settings.json file for correct API configuration.")
         sys.exit(1)
         
     if mic_active:
@@ -250,6 +255,8 @@ def main():
             brain.browser.close()
         if 'output_manager' in locals():
             output_manager.stop()
+        if 'agent_monitor' in locals() and agent_monitor.is_running:
+            agent_monitor.stop()
     except Exception:
         pass
 
