@@ -76,16 +76,6 @@ def handle_user_query(user_text, brain, output_manager, was_queued=False):
     if not user_text or not user_text.strip():
         return
 
-    # If Ultron is asleep and command is not a wake command, stay completely silent
-    if brain.is_asleep:
-        text_lower = user_text.lower().strip()
-        wake_phrases = ["wake up", "get up"]
-        wake_words = {"wakeup", "getup", "wake"}
-        words = set(text_lower.split())
-        is_wake_cmd = any(p in text_lower for p in wake_phrases) or bool(words.intersection(wake_words))
-        if not is_wake_cmd:
-            return
-
     if was_queued:
         LOADING_MESSAGES = [
             "Now for your next request...",

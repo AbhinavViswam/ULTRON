@@ -38,6 +38,169 @@ from ultron.plugins.agent_monitor_plugin import (
     agent_monitor_configure, install_agent_hooks
 )
 
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6
+}
+
+_TIME_PATTERN = re.compile(
+    r'(?P<h>\d{1,2})\s*(?::\s*(?P<m>\d{2}))?\s*(?::\s*(?P<s>\d{2}))?\s*'
+    r'(?P<ap>a\.?m\.?|p\.?m\.?)?',
+    re.IGNORECASE
+)
+
+
+def parse_time_string(time_str: str, now: datetime.datetime = None) -> datetime.datetime:
+    """Parses a natural clock time into a concrete future datetime.
+
+    Accepts ISO timestamps ('2026-08-12T10:20'), dates with times
+    ('2026-08-12 10:20'), clock times ('10:20 am', '17:30', '5pm') and
+    day prefixes ('today', 'tomorrow', 'monday'). A bare clock time that has
+    already passed today rolls forward to tomorrow.
+
+    Raises ValueError if no time can be recognised.
+    """
+    if now is None:
+        now = datetime.datetime.now()
+    if not time_str or not str(time_str).strip():
+        raise ValueError("no time was provided")
+
+    text = str(time_str).strip().lower()
+
+    # 1. Straight ISO / 'YYYY-MM-DD HH:MM' forms.
+    try:
+        return datetime.datetime.fromisoformat(text.replace("z", ""))
+    except ValueError:
+        pass
+
+    # 2. Pull an explicit date off the front if one is present.
+    base_date = now.date()
+    day_offset_applied = False
+
+    iso_date = re.match(r'(\d{4})-(\d{2})-(\d{2})', text)
+    if iso_date:
+        base_date = datetime.date(int(iso_date.group(1)), int(iso_date.group(2)), int(iso_date.group(3)))
+        text = text[iso_date.end():].strip()
+        day_offset_applied = True
+    elif text.startswith("tomorrow"):
+        base_date = now.date() + datetime.timedelta(days=1)
+        text = text[len("tomorrow"):].strip()
+        day_offset_applied = True
+    elif text.startswith("today") or text.startswith("tonight"):
+        text = text.split(None, 1)[1].strip() if " " in text else ""
+        day_offset_applied = True
+    else:
+        for name, index in _WEEKDAYS.items():
+            if text.startswith(name) or text.startswith("next " + name):
+                text = text.split(name, 1)[1].strip()
+                ahead = (index - now.weekday()) % 7 or 7
+                base_date = now.date() + datetime.timedelta(days=ahead)
+                day_offset_applied = True
+                break
+
+    text = text.lstrip("at ").strip() or "00:00"
+
+    # 3. Parse the clock portion.
+    match = _TIME_PATTERN.search(text)
+    if not match:
+        raise ValueError(f"could not understand the time '{time_str}'")
+
+    hour = int(match.group("h"))
+    minute = int(match.group("m") or 0)
+    second = int(match.group("s") or 0)
+    meridiem = (match.group("ap") or "").replace(".", "")
+
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+
+    if hour > 23 or minute > 59 or second > 59:
+        raise ValueError(f"'{time_str}' is not a valid clock time")
+
+    scheduled = datetime.datetime.combine(
+        base_date, datetime.time(hour, minute, second)
+    )
+
+    # 4. A bare time that already passed today means the next occurrence.
+    if scheduled <= now and not day_offset_applied:
+        scheduled += datetime.timedelta(days=1)
+
+    return scheduled
+
+
+# Argument names local models commonly invent, mapped to the real parameter.
+_ARG_ALIASES = {
+    "time_str": ["time", "at", "when", "at_time", "time_string", "clock_time", "scheduled_for", "start_time"],
+    "description": ["task", "text", "message", "reminder", "title", "desc", "content", "body", "note"],
+    "frequency": ["repeat", "repeats", "recurrence", "interval", "every"],
+    "delay_seconds": ["seconds", "delay", "in_seconds", "duration"],
+    "start_delay_seconds": ["delay_seconds", "seconds", "delay", "in_seconds"],
+    "until_date_iso": ["until", "until_date", "end_date", "end"],
+}
+
+
+def coerce_tool_args(func, raw_args: dict) -> dict:
+    """Normalises loosely-formed tool arguments so weak models can call tools.
+
+    Fills parameters from known aliases, coerces strings to int/bool where the
+    signature asks for them, and drops arguments the function does not accept
+    (which would otherwise raise TypeError). Raises ValueError when a required
+    parameter is still missing.
+    """
+    if not isinstance(raw_args, dict):
+        raw_args = {}
+
+    sig = inspect.signature(func)
+    params = sig.parameters
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if accepts_kwargs:
+        return dict(raw_args)
+
+    args = dict(raw_args)
+    clean = {}
+
+    for name, param in params.items():
+        if name in args:
+            clean[name] = args.pop(name)
+            continue
+        # Try aliases, but never steal a value that is itself a real parameter.
+        for alias in _ARG_ALIASES.get(name, []):
+            if alias in args and alias not in params:
+                clean[name] = args.pop(alias)
+                break
+
+    # Single unnamed leftover for a single missing parameter — take the guess.
+    missing = [n for n, p in params.items()
+               if n not in clean and p.default == inspect.Parameter.empty]
+    if len(missing) == 1 and len(args) == 1:
+        clean[missing[0]] = args.popitem()[1]
+        missing = []
+
+    if missing:
+        raise ValueError(
+            f"{func.__name__} is missing required argument(s): {', '.join(missing)}"
+        )
+
+    # Type coercion against the annotations.
+    for name, value in list(clean.items()):
+        annotation = params[name].annotation
+        if value is None:
+            continue
+        if annotation == int and not isinstance(value, int):
+            try:
+                clean[name] = int(float(str(value).strip()))
+            except (TypeError, ValueError):
+                raise ValueError(f"{func.__name__} expected a number for '{name}', got '{value}'")
+        elif annotation == bool and not isinstance(value, bool):
+            clean[name] = str(value).strip().lower() in ("true", "yes", "1", "y", "confirmed")
+
+    if args:
+        print(f"[Tool Warning] Ignored unexpected argument(s) for {func.__name__}: {', '.join(args)}")
+
+    return clean
+
+
 class ToolBridge:
     """Helper to convert Python functions to OpenAI JSON schemas."""
     @staticmethod
@@ -163,6 +326,40 @@ class Brain:
             self.db.add_task(description, scheduled_for, frequency, until_date_iso)
             return f"Recurring reminder '{frequency}' successfully set to trigger first in {start_delay_seconds} seconds."
 
+        def set_reminder_at(description: str, time_str: str) -> str:
+            """Sets a one-time reminder at a clock time, e.g. '10:20 am', '17:30', 'tomorrow 9am'. Use this whenever the user gives a time of day rather than a delay."""
+            try:
+                scheduled = parse_time_string(time_str)
+            except ValueError as e:
+                return f"Error: {e}. Please give a time like '10:20 am' or '17:30'."
+            self.db.add_task(description, scheduled.isoformat())
+            return f"Reminder '{description}' set for {scheduled.strftime('%A, %Y-%m-%d at %I:%M %p')}."
+
+        def set_recurring_reminder_at(description: str, time_str: str, frequency: str, until_date_iso: str = None) -> str:
+            """Sets a repeating reminder at a clock time, e.g. '10:20 am' daily. frequency must be 'hourly', 'daily', 'weekly', or 'monthly'. Use this for requests like 'remind me every day at 10:20 am'."""
+            freq = (frequency or "daily").strip().lower().rstrip("(),.")
+            aliases = {
+                "every day": "daily", "day": "daily", "everyday": "daily",
+                "every hour": "hourly", "hour": "hourly",
+                "every week": "weekly", "week": "weekly",
+                "every month": "monthly", "month": "monthly",
+            }
+            freq = aliases.get(freq, freq)
+            if freq not in ("hourly", "daily", "weekly", "monthly"):
+                return f"Error: frequency '{frequency}' is not supported. Use hourly, daily, weekly, or monthly."
+            try:
+                scheduled = parse_time_string(time_str)
+            except ValueError as e:
+                return f"Error: {e}. Please give a time like '10:20 am' or '17:30'."
+            self.db.add_task(description, scheduled.isoformat(), freq, until_date_iso)
+            return (f"Recurring reminder '{description}' set to repeat {freq}, "
+                    f"starting {scheduled.strftime('%A, %Y-%m-%d at %I:%M %p')}.")
+
+        def delete_reminder(task_id: int) -> str:
+            """Deletes a reminder by its numeric id. Call list_reminders first to find the id."""
+            self.db.delete_task(task_id)
+            return f"Reminder [{task_id}] deleted."
+
         def list_reminders() -> str:
             """Lists all pending reminders. Use this when the user asks to see, show, or list their reminders."""
             tasks = self.db.get_pending_tasks()
@@ -176,7 +373,7 @@ class Brain:
                 else:
                     task_id, desc, scheduled_for, created, frequency, until_date = task
                 freq_str = f" (repeats {frequency})" if frequency else ""
-                lines.append(f"- [{task_id}] \"{desc}\" — scheduled for {scheduled_for}{freq_str}")
+                lines.append(f"- [{task_id}] \"{desc}\" - scheduled for {scheduled_for}{freq_str}")
             return f"Pending reminders ({len(tasks)}):\n" + "\n".join(lines)
         def search_memories(query: str) -> str:
             """Searches for relevant memories. Call this when you need to recall a fact about the user."""
@@ -326,8 +523,11 @@ class Brain:
             "list_workflows": list_workflows,
             "delete_workflow": delete_workflow,
             "set_reminder": set_reminder,
+            "set_reminder_at": set_reminder_at,
             "set_recurring_reminder": set_recurring_reminder,
+            "set_recurring_reminder_at": set_recurring_reminder_at,
             "list_reminders": list_reminders,
+            "delete_reminder": delete_reminder,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
             "screen_read": screen_read,
             "screen_read_detailed": screen_read_detailed,
@@ -359,7 +559,6 @@ class Brain:
         
         # Initialize conversation history
         self.messages = [{"role": "system", "content": sys_instruct}]
-        self.is_asleep = False
         
         print("Ultron's Brain initialized and ready.")
 
@@ -399,7 +598,11 @@ CURRENT SYSTEM TIME: {now_str}
 - TO REMEMBER: If the user tells you a fact, preference, or detail to remember, use `save_memory`.
 - TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?", "what is my github"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database!
 - TO RECALL CHATS: If the user references a past conversation, use `search_past_conversations`.
-- REMINDERS: If the user asks to be reminded of something, calculate the delay in seconds and use the `set_reminder` tool with `delay_seconds`. DO NOT use `save_memory` for time-based reminders.
+- REMINDERS (CRITICAL): DO NOT use `save_memory` for time-based reminders.
+  - If the user gives a CLOCK TIME ("at 10:20 am", "at 5pm", "tomorrow at 9"), use `set_reminder_at` with `time_str` set to that time verbatim. Do NOT convert it to seconds yourself.
+  - If that clock time REPEATS ("every day at 10:20 am", "daily at 6pm"), use `set_recurring_reminder_at` with `time_str` and `frequency` ('hourly', 'daily', 'weekly', 'monthly').
+  - Only if the user gives a DURATION ("in 5 minutes") use `set_reminder` with `delay_seconds`, or `set_recurring_reminder` with `start_delay_seconds`.
+  - To show reminders use `list_reminders`; to remove one use `list_reminders` first, then `delete_reminder` with its id.
 
 # BROWSER AUTOMATION
 You have full interactive control over a web browser.
@@ -535,6 +738,32 @@ Your response: Let me take a look at your screen, sir.
 {{"name": "screen_read", "arguments": {{}}}}
 </tool_call>
 
+User: "Set a reminder at 10:20 am daily for the RateUp meeting"
+Your response: Certainly, sir.
+<tool_call>
+{{"name": "set_recurring_reminder_at", "arguments": {{"description": "RateUp meeting", "time_str": "10:20 am", "frequency": "daily"}}}}
+</tool_call>
+
+User: "Remind me at 6pm to call mom"
+Your response: Of course, sir.
+<tool_call>
+{{"name": "set_reminder_at", "arguments": {{"description": "call mom", "time_str": "6pm"}}}}
+</tool_call>
+
+User: "Show me all my reminders"
+Your response: Right away, sir.
+<tool_call>
+{{"name": "list_reminders", "arguments": {{}}}}
+</tool_call>
+
+# REMINDERS (CRITICAL)
+- A CLOCK TIME ("at 10:20 am", "at 5pm", "tomorrow at 9") means `set_reminder_at`. Pass the time as `time_str` EXACTLY as the user said it. NEVER try to convert a clock time into seconds yourself.
+- A REPEATING clock time ("every day at 10:20 am") means `set_recurring_reminder_at` with `time_str` and `frequency` ('hourly', 'daily', 'weekly', 'monthly').
+- Only a DURATION ("in 5 minutes") uses `set_reminder` with `delay_seconds`.
+- Use the EXACT argument names shown above. Do not invent argument names like "time" or "task".
+- To show reminders use `list_reminders`. To remove one, call `list_reminders` first, then `delete_reminder` with the numeric id.
+- If a tool result starts with "Error", you MUST tell the user what went wrong. NEVER reply "Done." after an error.
+
 # SCREEN AWARENESS
 - PRIMARY: If the user asks "what is on my screen", use `screen_read`. This is the fastest method — it reads all visible UI controls and text without taking a screenshot. Pass `window_title` to read a specific window.
 - DETAILED: Use `screen_read_detailed` for precise layout info (bounding boxes, element positions).
@@ -559,7 +788,7 @@ Your response: Let me take a look at your screen, sir.
 - If no tool is needed (e.g., general chat or a question), just respond normally WITHOUT any <tool_call> block.
 - For destructive actions (delete_file, empty_recycle_bin), ask for confirmation first before calling the tool.
 - To remember facts, use save_memory. To recall facts about the user, use search_memories FIRST.
-- To set time-based reminders, calculate the delay in seconds and use the set_reminder tool with delay_seconds."""
+- For reminders, follow the REMINDERS rules above: clock times use set_reminder_at / set_recurring_reminder_at, durations use set_reminder."""
         if truth_mode:
             prompt += "\n\n" + self._get_truth_mode_instructions()
         return prompt
@@ -585,6 +814,26 @@ Your response: Let me take a look at your screen, sir.
         """Remove <tool_call>...</tool_call> blocks from model output to get the clean chat text."""
         cleaned = re.sub(r'<tool_call>\s*\{.*?\}\s*</tool_call>', '', text, flags=re.DOTALL)
         return cleaned.strip()
+
+    def _invoke_tool(self, func_name: str, func_args) -> str:
+        """Executes a tool by name with loosely-formed arguments.
+
+        Returns the tool's result, or an 'Error: ...' string the model can read
+        back to the user. Never raises.
+        """
+        func = self.tool_functions.get(func_name)
+        if func is None:
+            return f"Error: unknown tool '{func_name}'."
+
+        try:
+            clean_args = coerce_tool_args(func, func_args)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        try:
+            return func(**clean_args)
+        except Exception as e:
+            return f"Error executing {func_name}: {e}"
 
     def _record_usage(self, response):
         """Records token usage from the API response into usage.json."""
@@ -638,43 +887,8 @@ Your response: Let me take a look at your screen, sir.
         except Exception:
             pass
 
-    def _handle_sleep_wake(self, user_text: str):
-        """Check for sleep/wake commands. Returns (handled: bool, reply: str|None)."""
-        text_lower = user_text.lower().strip()
-        sleep_phrases = ["go to sleep", "take a nap", "take a rest"]
-        wake_phrases = ["wake up", "get up"]
-        sleep_words = {"sleep", "nap", "rest"}
-        wake_words = {"wakeup", "getup", "wake"}
-
-        words = set(text_lower.split())
-        is_sleep_cmd = any(p in text_lower for p in sleep_phrases) or bool(words.intersection(sleep_words))
-        is_wake_cmd = any(p in text_lower for p in wake_phrases) or bool(words.intersection(wake_words))
-
-        if self.is_asleep:
-            if is_wake_cmd:
-                self.is_asleep = False
-                reply = "I am awake now, sir! How can I assist you?"
-                self.db.save_message(session_id=self.session_id, role='user', message=user_text)
-                self.db.save_message(session_id=self.session_id, role='model', message=reply)
-                return True, reply
-            else:
-                return True, None
-        else:
-            if is_sleep_cmd:
-                self.is_asleep = True
-                reply = "Going to sleep now, sir. Zzz... Say 'wake up' or 'get up' when you need me!"
-                self.db.save_message(session_id=self.session_id, role='user', message=user_text)
-                self.db.save_message(session_id=self.session_id, role='model', message=reply)
-                return True, reply
-
-        return False, None
-
     def process_input(self, user_text: str) -> str:
         """Routes user input to the appropriate handler based on the active API."""
-        handled, reply = self._handle_sleep_wake(user_text)
-        if handled:
-            return reply
-
         if self.active_api == "localapi":
             return self._process_input_local(user_text)
         else:
@@ -691,6 +905,7 @@ Your response: Let me take a look at your screen, sir.
             self.messages.append({"role": "user", "content": user_text})
 
             max_tool_rounds = 5  # Prevent infinite loops
+            last_errors = []  # Tool failures from the most recent round
 
             for _ in range(max_tool_rounds):
                 # Call local model WITHOUT tools/tool_choice params
@@ -719,24 +934,28 @@ Your response: Let me take a look at your screen, sir.
                 tool_calls = self._parse_tool_calls_from_text(raw_text)
 
                 if not tool_calls:
-                    # No tool calls — this is the final response
-                    clean_text = self._strip_tool_calls_from_text(raw_text) or "Done."
+                    # No tool calls — this is the final response. Never let a
+                    # failed tool be reported to the user as a bare "Done."
+                    clean_text = self._strip_tool_calls_from_text(raw_text)
+                    if not clean_text:
+                        clean_text = ("Sir, that did not go through: " + " ".join(last_errors)
+                                      if last_errors else "Done.")
                     self.db.save_message(session_id=self.session_id, role='model', message=clean_text)
                     return clean_text
 
                 # Execute each tool call and collect results
                 results_text_parts = []
+                last_errors = []
                 for tc in tool_calls:
                     func_name = tc.get("name", "")
                     func_args = tc.get("arguments", {})
 
-                    if func_name in self.tool_functions:
-                        try:
-                            result = self.tool_functions[func_name](**func_args)
-                        except Exception as e:
-                            result = f"Error executing tool: {e}"
-                    else:
-                        result = f"Unknown tool: {func_name}"
+                    print(f"[Tool Call] {func_name}({func_args})")
+                    result = self._invoke_tool(func_name, func_args)
+                    print(f"[Tool Result] {result}")
+
+                    if str(result).startswith("Error"):
+                        last_errors.append(str(result))
 
                     results_text_parts.append(f"[Tool Result for {func_name}]: {result}")
 
@@ -805,16 +1024,8 @@ Your response: Let me take a look at your screen, sir.
                         function_args = {}
                         
                     t1 = _time.monotonic()
-                    if function_name in self.tool_functions:
-                        function_to_call = self.tool_functions[function_name]
-                        try:
-                            # Actually execute the python code
-                            function_response = function_to_call(**function_args)
-                        except Exception as e:
-                            function_response = f"Error executing tool: {e}"
-                    else:
-                        function_response = f"Unknown tool: {function_name}"
-                    
+                    function_response = self._invoke_tool(function_name, function_args)
+
                     print(f"[Timing] Tool '{function_name}' executed in {_time.monotonic() - t1:.1f}s")
                         
                     # Append the tool's result to the history
