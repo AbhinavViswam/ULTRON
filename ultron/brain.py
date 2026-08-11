@@ -726,6 +726,12 @@ Your response: Yes sir, opening Spotify for you now.
 {{"name": "open_application", "arguments": {{"app_name": "spotify"}}}}
 </tool_call>
 
+User: "Close Chrome"
+Your response: Closing Chrome immediately, sir.
+<tool_call>
+{{"name": "close_application", "arguments": {{"app_name": "chrome"}}}}
+</tool_call>
+
 User: "Search Google for latest news"
 Your response: Right away, sir.
 <tool_call>
