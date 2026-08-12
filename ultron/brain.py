@@ -8,8 +8,8 @@ from openai import OpenAI
 
 from ultron.database import Database
 from ultron.automation import (
-    open_application, close_application, system_media_control, 
-    search_spotify, adjust_volume, take_screenshot, BrowserManager,
+    open_application, close_application, system_media_control,
+    search_spotify, adjust_volume, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
@@ -22,7 +22,7 @@ from ultron.plugins.docker_plugin import (
     docker_stop_container, docker_remove_container, docker_run_image, docker_start_daemon
 )
 from ultron.plugins.research_plugin import (
-    web_search, research_read_url, save_research, list_research_reports, run_background_research_task
+    web_search, list_research_reports, run_background_research_task
 )
 from ultron.plugins.workflow_plugin import (
     create_workflow, run_workflow, list_workflows, delete_workflow
@@ -129,6 +129,120 @@ def parse_time_string(time_str: str, now: datetime.datetime = None) -> datetime.
     return scheduled
 
 
+# ---------------------------------------------------------------------------
+# Tool routing: maps logical group names to the tool function names they own.
+# The local model system prompt is rebuilt per-query with only the matched
+# groups so the context window stays small and instruction-following improves.
+# ---------------------------------------------------------------------------
+TOOL_GROUPS: dict[str, list[str]] = {
+    # Always included — memory and reminders are needed for any conversation
+    "core": [
+        "save_memory", "search_memories", "search_past_conversations",
+        "set_reminder", "set_reminder_at", "set_recurring_reminder",
+        "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+    ],
+    # Desktop app control + media + volume
+    "system": [
+        "open_application", "close_application", "system_media_control",
+        "adjust_volume", "search_spotify",
+    ],
+    # Full browser automation
+    "browser": [
+        "browser_navigate", "browser_read_page", "browser_click",
+        "browser_type_text", "browser_press_key", "browser_go_back",
+        "browser_go_forward", "browser_new_tab", "browser_switch_tab",
+        "browser_close_tab", "browser_take_screenshot", "browser_scroll",
+        "browser_close",
+    ],
+    # Screen reading / OCR / window awareness
+    "screen": [
+        "screen_read", "screen_read_detailed", "screen_capture",
+        "screen_read_ocr", "screen_find", "screen_get_resolution",
+        "screen_get_active_window", "screen_get_mouse_position",
+    ],
+    # File system, clipboard, documents, notepad
+    "files": [
+        "find_files", "read_file_content", "create_file", "delete_file",
+        "copy_file", "move_file", "list_directory", "open_folder",
+        "read_clipboard", "copy_to_clipboard", "write_in_notepad",
+        "read_document", "get_selected_file_in_explorer",
+    ],
+    # System health, power, disk cleanup
+    "system_health": [
+        "get_system_health", "empty_recycle_bin", "clean_temp_files",
+        "system_power_control", "screen_capture",
+    ],
+    # Gmail
+    "email": ["read_emails", "send_email", "draft_email"],
+    # Docker
+    "docker": [
+        "docker_list_containers", "docker_list_images",
+        "docker_start_container", "docker_stop_container",
+        "docker_remove_container", "docker_run_image", "docker_start_daemon",
+    ],
+    # Deep research pipeline
+    "research": [
+        "web_search", "list_research_reports", "start_background_research",
+    ],
+    # Quick single web search (included separately so it appears for simple fact queries)
+    "web_search": ["web_search"],
+    # Saved workflow engine
+    "workflow": ["create_workflow", "run_workflow", "list_workflows", "delete_workflow"],
+    # Agent / Claude Code monitor
+    "agent_monitor": [
+        "agent_monitor_start", "agent_monitor_stop", "agent_monitor_status",
+        "agent_monitor_configure", "install_agent_hooks",
+    ],
+    # WhatsApp messaging
+    "whatsapp": ["send_whatsapp_message"],
+}
+
+# Keywords that trigger each tool group (order doesn't matter)
+_GROUP_TRIGGERS: dict[str, list[str]] = {
+    "system": [
+        "open", "launch", "start", "close", "quit", "exit", "app", "application",
+        "volume", "mute", "music", "play", "pause", "next", "prev", "previous",
+        "spotify", "media", "song", "track",
+    ],
+    "browser": [
+        "browser", "navigate", "browse", "website", "url", "http", "tab",
+        "click", "type into", "scroll", "go back", "go forward", "new tab",
+        "open link", "open url", "go to", "visit", "link", "first link",
+        "second link", "that link", "the link", "the site", "the page",
+        "open chrome", "open browser", "youtube", "google", "facebook",
+        "twitter", "instagram", "reddit", "github", "stackoverflow",
+    ],
+    "screen": [
+        "screen", "see", "look", "what's on", "what is on", "window", "ocr",
+        "visible", "display", "monitor", "mouse", "cursor", "active window",
+    ],
+    "files": [
+        "file", "folder", "directory", "copy", "move", "delete", "create",
+        "find", "read", "clipboard", "document", "pdf", "docx", "word",
+        "notepad", "selected", "explorer", "download", "desktop",
+    ],
+    "system_health": [
+        "cpu", "ram", "battery", "disk", "storage", "health", "memory usage",
+        "temperature", "clean", "recycle bin", "temp files", "shutdown",
+        "restart", "sleep", "lock", "screenshot",
+    ],
+    "email": ["email", "gmail", "mail", "inbox", "send email", "draft"],
+    "docker": ["docker", "container", "image", "daemon", "compose"],
+    "research": [
+        "research", "investigate", "look into", "report", "background research",
+    ],
+    "web_search": [
+        "search", "google", "what is", "who is", "news", "weather", "price",
+        "current", "latest", "fact", "find out", "look up", "tell me about",
+    ],
+    "workflow": ["workflow", "run workflow", "create workflow", "list workflow"],
+    "agent_monitor": [
+        "agent", "claude", "coding agent", "watching", "monitor agent",
+        "is claude done", "agent done",
+    ],
+    "whatsapp": ["whatsapp", "send message", "message to", "chat"],
+}
+
 # Argument names local models commonly invent, mapped to the real parameter.
 _ARG_ALIASES = {
     "time_str": ["time", "at", "when", "at_time", "time_string", "clock_time", "scheduled_for", "start_time"],
@@ -137,6 +251,12 @@ _ARG_ALIASES = {
     "delay_seconds": ["seconds", "delay", "in_seconds", "duration"],
     "start_delay_seconds": ["delay_seconds", "seconds", "delay", "in_seconds"],
     "until_date_iso": ["until", "until_date", "end_date", "end"],
+    # Browser navigation — local models often use 'url', 'link', 'query', 'address'
+    # instead of the exact parameter name 'query_or_url'
+    "query_or_url": ["url", "link", "href", "query", "address", "site", "destination", "page", "target"],
+    # Browser interaction — local models often use 'selector', 'text', 'element'
+    # instead of 'text_or_selector'
+    "text_or_selector": ["selector", "element", "target", "locator"],
 }
 
 
@@ -465,16 +585,36 @@ class Brain:
 
         # Register all tools in a dictionary
         self.tool_functions = {
+            # ── Memory & Reminders ─────────────────────────────────────────
             "save_memory": save_memory,
-            "set_reminder": set_reminder,
             "search_memories": search_memories,
             "search_past_conversations": search_past_conversations,
+            "set_reminder": set_reminder,
+            "set_reminder_at": set_reminder_at,
+            "set_recurring_reminder": set_recurring_reminder,
+            "set_recurring_reminder_at": set_recurring_reminder_at,
+            "list_reminders": list_reminders,
+            "delete_reminder": delete_reminder,
+            # ── System & Apps ──────────────────────────────────────────────
             "open_application": open_application,
             "close_application": close_application,
             "system_media_control": system_media_control,
             "adjust_volume": adjust_volume,
-            "take_screenshot": take_screenshot,
             "search_spotify": search_spotify,
+            "get_system_health": get_system_health,
+            "system_power_control": system_power_control,
+            "empty_recycle_bin": empty_recycle_bin,
+            "clean_temp_files": clean_temp_files,
+            # ── Screen ────────────────────────────────────────────────────
+            "screen_read": screen_read,
+            "screen_read_detailed": screen_read_detailed,
+            "screen_capture": screen_capture,   # replaces take_screenshot
+            "screen_read_ocr": screen_read_ocr,
+            "screen_find": screen_find,
+            "screen_get_resolution": screen_get_resolution,
+            "screen_get_active_window": screen_get_active_window,
+            "screen_get_mouse_position": screen_get_mouse_position,
+            # ── Browser ───────────────────────────────────────────────────
             "browser_navigate": browser_navigate,
             "browser_read_page": browser_read_page,
             "browser_click": browser_click,
@@ -488,9 +628,8 @@ class Brain:
             "browser_take_screenshot": browser_take_screenshot,
             "browser_scroll": browser_scroll,
             "browser_close": browser_close,
-            "get_system_health": get_system_health,
+            # ── Files & Clipboard ─────────────────────────────────────────
             "write_in_notepad": write_in_notepad,
-            "send_whatsapp_message": send_whatsapp_message,
             "read_clipboard": read_clipboard,
             "copy_to_clipboard": copy_to_clipboard,
             "find_files": find_files,
@@ -500,12 +639,15 @@ class Brain:
             "copy_file": copy_file,
             "move_file": move_file,
             "list_directory": list_directory,
-            "empty_recycle_bin": empty_recycle_bin,
-            "clean_temp_files": clean_temp_files,
-            "system_power_control": system_power_control,
+            "open_folder": open_folder,
+            "get_selected_file_in_explorer": get_selected_file_in_explorer,
+            "read_document": read_document,
+            # ── Communication ─────────────────────────────────────────────
+            "send_whatsapp_message": send_whatsapp_message,
             "read_emails": read_emails,
             "send_email": send_email,
             "draft_email": draft_email,
+            # ── Docker ────────────────────────────────────────────────────
             "docker_list_containers": docker_list_containers,
             "docker_list_images": docker_list_images,
             "docker_start_container": docker_start_container,
@@ -513,37 +655,24 @@ class Brain:
             "docker_remove_container": docker_remove_container,
             "docker_run_image": docker_run_image,
             "docker_start_daemon": docker_start_daemon,
+            # ── Research & Web ────────────────────────────────────────────
+            # NOTE: save_research and research_read_url are internal pipeline
+            # helpers used by start_background_research — not exposed as
+            # standalone tools to keep the AI prompt lean.
             "web_search": web_search,
-            "research_read_url": research_read_url,
-            "save_research": save_research,
             "list_research_reports": list_research_reports,
             "start_background_research": start_background_research,
+            # ── Workflows ─────────────────────────────────────────────────
             "create_workflow": create_workflow,
             "run_workflow": run_workflow_tool,
             "list_workflows": list_workflows,
             "delete_workflow": delete_workflow,
-            "set_reminder": set_reminder,
-            "set_reminder_at": set_reminder_at,
-            "set_recurring_reminder": set_recurring_reminder,
-            "set_recurring_reminder_at": set_recurring_reminder_at,
-            "list_reminders": list_reminders,
-            "delete_reminder": delete_reminder,
-            "get_selected_file_in_explorer": get_selected_file_in_explorer,
-            "screen_read": screen_read,
-            "screen_read_detailed": screen_read_detailed,
-            "screen_capture": screen_capture,
-            "screen_read_ocr": screen_read_ocr,
-            "screen_find": screen_find,
-            "screen_get_resolution": screen_get_resolution,
-            "screen_get_active_window": screen_get_active_window,
-            "screen_get_mouse_position": screen_get_mouse_position,
-            "open_folder": open_folder,
-            "read_document": read_document,
+            # ── Agent Monitor ─────────────────────────────────────────────
             "agent_monitor_start": agent_monitor_start,
             "agent_monitor_stop": agent_monitor_stop,
             "agent_monitor_status": agent_monitor_status,
             "agent_monitor_configure": agent_monitor_configure,
-            "install_agent_hooks": install_agent_hooks
+            "install_agent_hooks": install_agent_hooks,
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -579,25 +708,12 @@ You are currently operating in TRUTH MODE. You must strictly adhere to the follo
 - ✅ If the user is making an emotional decision, point that out.
 - ✅ Be respectful, but do NOT prioritize comfort over truth."""
 
-    def _build_cloud_system_prompt(self, now_str: str, truth_mode: bool = False) -> str:
-        """Build the system prompt for cloud API providers (OpenRouter / Gemini)."""
-        prompt = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
-
-CURRENT SYSTEM TIME: {now_str}
-
-# CRITICAL TOOL USAGE RULES
-- You are equipped with a set of tools (functions). When the user asks you to perform an action (e.g., search the web, open an application, play music), you MUST invoke the provided tool natively via the tool-calling JSON API.
-- DO NOT output raw Python code, bash scripts, or literal string names like `open_application('spotify')`. You must use the actual tool-calling format.
-
-# CORE RULES
-- Provide concise, accurate, and professional answers.
-- ALWAYS address the user respectfully as "sir" (e.g., "Yes, sir", "You are welcome, sir", "How may I help you, sir?").
-- You DO NOT know any personal details about the user by default. You MUST use your memory tools to find out.
-
-# MEMORY ENGINE (CRITICAL)
+    def _get_shared_tool_instructions(self) -> str:
+        """Returns the tool semantic mappings shared between both cloud and local models."""
+        return """# MEMORY ENGINE (CRITICAL)
 - TO REMEMBER: If the user tells you a fact, preference, or detail to remember, use `save_memory`.
-- TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?", "what is my github"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database!
-- TO RECALL CHATS: If the user references a past conversation, use `search_past_conversations`.
+- TO RECALL FACTS/PROJECTS: If the user asks if you remember something (e.g. a project), or asks about themselves, FIRST use `search_memories`. If you do not find the answer, you MUST then use `search_past_conversations` to check chat history. NEVER say you don't know until you have searched BOTH!
+- TO RECALL CHATS: If the user explicitly references a past conversation, use `search_past_conversations`.
 - REMINDERS (CRITICAL): DO NOT use `save_memory` for time-based reminders.
   - If the user gives a CLOCK TIME ("at 10:20 am", "at 5pm", "tomorrow at 9"), use `set_reminder_at` with `time_str` set to that time verbatim. Do NOT convert it to seconds yourself.
   - If that clock time REPEATS ("every day at 10:20 am", "daily at 6pm"), use `set_recurring_reminder_at` with `time_str` and `frequency` ('hourly', 'daily', 'weekly', 'monthly').
@@ -615,8 +731,23 @@ You have full interactive control over a web browser.
 # SYSTEM AUTOMATION & TOOLS
 - Use `open_application` to launch local desktop apps.
 - Use `close_application` to close local desktop apps.
-- TO CONTROL MUSIC: You MUST use `system_media_control` with action 'play', 'pause', 'next', or 'prev'. 
+- TO CONTROL MUSIC: You MUST use `system_media_control` with action 'play', 'pause', 'next', or 'prev'.
 - TO ADJUST VOLUME: Use `adjust_volume` with action 'volume_up', 'volume_down', or 'mute'.
+
+# MUSIC & SPOTIFY (CRITICAL — READ CAREFULLY)
+You have full autonomous music discovery capability. NEVER ask the user for a song name if they give you a genre, mood, language, or vague request.
+
+Decision tree:
+1. User names a specific song/artist (e.g. "play Believer by Imagine Dragons") → call `search_spotify` immediately with that query.
+2. User gives a vague request (e.g. "play some Malayalam songs", "play lofi", "play something chill", "play music") → FIRST call `web_search` with a query like "best Malayalam songs 2024" or "top lofi hits", pick a good song/artist from the results, THEN call `search_spotify` with that song name. Do NOT ask the user.
+3. User wants to control playback (pause/play/skip) → use `system_media_control`.
+4. User wants to open Spotify app → use `open_application` with "spotify".
+
+Examples of autonomous behaviour:
+- "Play some Malayalam songs" → web_search("popular Malayalam songs 2024") → pick a result → search_spotify("Kesariya Tera Ishq Hoon Malayalam cover") [or whatever good result came back]
+- "Play something relaxing" → web_search("top relaxing instrumental songs") → pick → search_spotify
+- "Play the latest hits" → web_search("top songs this week") → pick → search_spotify
+- "Play music" → search_spotify("top hits 2024") directly (broad enough to work without pre-search)
 
 # SCREEN AWARENESS
 - PRIMARY: If the user asks "what is on my screen", "what do you see", or asks about a visible element, use `screen_read`. This is fast and returns a text summary of all visible UI controls and text. It works with any model (no vision needed). You can pass a `window_title` to read a specific window even if it is not focused.
@@ -625,12 +756,12 @@ You have full interactive control over a web browser.
 - OCR FALLBACK: Use `screen_read_ocr` for canvas, game, or custom-drawn UI content that `screen_read` cannot detect. You can specify a screen region (left, top, right, bottom) or read the full screen.
 - If you need to find where something is on screen, use `screen_find`.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
-- TO SEARCH MUSIC: Use the `search_spotify` tool to open it directly in the Spotify app.
 - SYSTEM HEALTH: Use `get_system_health` to check CPU, RAM, Battery %, and Disk storage space.
 - WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
-- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files, `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
+- FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files (ALWAYS prefer this for saving text — it's fast and reliable), `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
+- WRITING TEXT: To save text to a file silently, use `create_file`. Only use `write_in_notepad` when the user explicitly wants to SEE Notepad open with the text visible on screen.
 - SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
 - READING DOCUMENTS: Use `read_document` to read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP). For images, it extracts text using OCR. If a PDF/DOCX is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
@@ -662,14 +793,38 @@ You can watch the user's coding agents (Claude Code in VSCode, Antigravity, etc.
 - STATUS: If the user asks "is Claude done?", "what are my agents doing?", or "is anything waiting on me?", use `agent_monitor_status`.
 - ALERT STYLE: If the user wants alerts quieter or louder, use `agent_monitor_configure` with 'toast', 'voice', or 'both'.
 - SETUP: `install_agent_hooks` installs the global Claude Code hooks so every session on the machine reports in. This only needs to run once — tell the user to restart their Claude Code sessions afterwards."""
+
+    def _build_cloud_system_prompt(self, now_str: str, truth_mode: bool = False) -> str:
+        """Build the system prompt for cloud API providers (OpenRouter / Gemini)."""
+        prompt = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
+
+CURRENT SYSTEM TIME: {now_str}
+
+# CRITICAL TOOL USAGE RULES
+- You are equipped with a set of tools (functions). When the user asks you to perform an action (e.g., search the web, open an application, play music), you MUST invoke the provided tool natively via the tool-calling JSON API.
+- DO NOT output raw Python code, bash scripts, or literal string names like `open_application('spotify')`. You must use the actual tool-calling format.
+
+# CORE RULES
+- Provide concise, accurate, and professional answers.
+- ALWAYS address the user respectfully as "sir" (e.g., "Yes, sir", "You are welcome, sir", "How may I help you, sir?").
+- You DO NOT know any personal details about the user by default. You MUST use your memory tools to find out.
+
+{self._get_shared_tool_instructions()}"""
         if truth_mode:
             prompt += "\n\n" + self._get_truth_mode_instructions()
         return prompt
 
-    def _build_local_tools_prompt(self) -> str:
-        """Build a compact text-based tool listing for embedding into a local model's system prompt."""
+    def _build_local_tools_prompt(self, tool_names: list[str] = None) -> str:
+        """Build a compact text-based tool listing for embedding into a local model's system prompt.
+
+        Args:
+            tool_names: If provided, only include tools whose names are in this list.
+                        If None, all registered tools are included (legacy behaviour).
+        """
         lines = []
         for name, func in self.tool_functions.items():
+            if tool_names is not None and name not in tool_names:
+                continue
             sig = inspect.signature(func)
             params = []
             for pname, p in sig.parameters.items():
@@ -685,14 +840,57 @@ You can watch the user's coding agents (Claude Code in VSCode, Antigravity, etc.
             lines.append(f"- {name}({params_str}): {doc}")
         return "\n".join(lines)
 
-    def _build_local_system_prompt(self, now_str: str, truth_mode: bool = False) -> str:
+    def _classify_query(self, user_text: str) -> list[str]:
+        """Return the list of tool-group names relevant to the user's query.
+
+        Uses fast keyword matching against _GROUP_TRIGGERS.  The 'core' group
+        is always included.  If no non-core group matches we fall back to ALL
+        groups so the model still has every tool available for ambiguous queries.
+        """
+        text_lower = user_text.lower()
+        matched = ["core"]
+        for group, keywords in _GROUP_TRIGGERS.items():
+            for kw in keywords:
+                if kw in text_lower:
+                    if group not in matched:
+                        matched.append(group)
+                    break
+        # Fallback: ambiguous query — give the model everything
+        if len(matched) == 1:  # only 'core' matched
+            return list(TOOL_GROUPS.keys())
+        return matched
+
+    def _build_local_tools_prompt_for_query(self, user_text: str) -> tuple[str, list[str]]:
+        """Build a filtered tool description string for just the groups relevant to *user_text*.
+
+        Returns:
+            (tools_text, matched_groups) — the prompt fragment and the group names used.
+        """
+        matched_groups = self._classify_query(user_text)
+        # Deduplicate tool names while preserving order
+        seen: set[str] = set()
+        tool_names: list[str] = []
+        for group in matched_groups:
+            for name in TOOL_GROUPS.get(group, []):
+                if name not in seen and name in self.tool_functions:
+                    seen.add(name)
+                    tool_names.append(name)
+        tools_text = self._build_local_tools_prompt(tool_names)
+        return tools_text, matched_groups
+
+    def _build_local_system_prompt(self, now_str: str, truth_mode: bool = False, tools_text: str = None) -> str:
         """Build the system prompt for LOCAL models with embedded tool descriptions.
-        
-        Since local models don't support the OpenAI tool-calling API, we embed all tool
+
+        Since local models don't support the OpenAI tool-calling API, we embed tool
         descriptions directly and instruct the model to output a specific XML-tagged
         JSON block when it wants to call a tool.
+
+        Args:
+            tools_text: Pre-built tool description string.  If None, all tools are
+                        embedded (used at startup / for the base system message).
         """
-        tools_text = self._build_local_tools_prompt()
+        if tools_text is None:
+            tools_text = self._build_local_tools_prompt()
         prompt = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant running on a Windows PC.
 
 CURRENT SYSTEM TIME: {now_str}
@@ -703,10 +901,7 @@ CURRENT SYSTEM TIME: {now_str}
 - You DO NOT know personal details about the user by default. Use memory tools to find out.
 - INTERNET ACCESS: For factual information, current events, or questions about specific people/things, you MUST use the `web_search` tool to get the latest up-to-date information before answering. If the tool fails or you have no internet access, you may fall back to answering from your internal training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST inform the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data.
 
-# MEMORY ENGINE (CRITICAL)
-- TO REMEMBER: If the user tells you a fact, preference, or detail to remember, use `save_memory`.
-- TO RECALL FACTS: If the user asks about themselves (e.g., "who am I?", "what is my name?", "what is my github"), you MUST ALWAYS use `search_memories` BEFORE responding. NEVER say you don't know until you have searched the database!
-- TO RECALL CHATS: If the user references a past conversation, use `search_past_conversations`.
+{self._get_shared_tool_instructions()}
 
 # AVAILABLE TOOLS
 You have the following tools available. When the user asks you to DO something (open an app, search the web, play music, check system health, etc.), you MUST use a tool.
@@ -724,6 +919,12 @@ User: "Open Spotify"
 Your response: Yes sir, opening Spotify for you now.
 <tool_call>
 {{"name": "open_application", "arguments": {{"app_name": "spotify"}}}}
+</tool_call>
+
+User: "Close Chrome"
+Your response: Closing Chrome immediately, sir.
+<tool_call>
+{{"name": "close_application", "arguments": {{"app_name": "chrome"}}}}
 </tool_call>
 
 User: "Close Chrome"
@@ -762,29 +963,41 @@ Your response: Right away, sir.
 {{"name": "list_reminders", "arguments": {{}}}}
 </tool_call>
 
-# REMINDERS (CRITICAL)
-- A CLOCK TIME ("at 10:20 am", "at 5pm", "tomorrow at 9") means `set_reminder_at`. Pass the time as `time_str` EXACTLY as the user said it. NEVER try to convert a clock time into seconds yourself.
-- A REPEATING clock time ("every day at 10:20 am") means `set_recurring_reminder_at` with `time_str` and `frequency` ('hourly', 'daily', 'weekly', 'monthly').
-- Only a DURATION ("in 5 minutes") uses `set_reminder` with `delay_seconds`.
-- Use the EXACT argument names shown above. Do not invent argument names like "time" or "task".
-- To show reminders use `list_reminders`. To remove one, call `list_reminders` first, then `delete_reminder` with the numeric id.
-- If a tool result starts with "Error", you MUST tell the user what went wrong. NEVER reply "Done." after an error.
+User: "Next song" or "Please next song" or "Skip this"
+Your response: Skipping to the next track, sir.
+<tool_call>
+{{"name": "system_media_control", "arguments": {{"action": "next"}}}}
+</tool_call>
 
-# SCREEN AWARENESS
-- PRIMARY: If the user asks "what is on my screen", use `screen_read`. This is the fastest method — it reads all visible UI controls and text without taking a screenshot. Pass `window_title` to read a specific window.
-- DETAILED: Use `screen_read_detailed` for precise layout info (bounding boxes, element positions).
-- SCREENSHOT: Use `screen_capture` only when the user explicitly asks for a screenshot or visual analysis is needed.
-- OCR FALLBACK: Use `screen_read_ocr` for canvas, game, or custom-drawn UI that `screen_read` cannot detect.
-- To find where something is on screen, use `screen_find`.
-- To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
-- To open file system folders like Downloads or Desktop, use `open_folder`.
-- To read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP), use `read_document`. For images, it extracts text using OCR. For long PDF/DOCX files, provide a `page` number.
+User: "Pause" or "Pause the music"
+Your response: Pausing music, sir.
+<tool_call>
+{{"name": "system_media_control", "arguments": {{"action": "pause"}}}}
+</tool_call>
 
-# AGENT MONITOR
-- If the user asks "is Claude done?", "what are my agents doing?", or "is anything waiting on me?", use `agent_monitor_status`.
-- Use `agent_monitor_start` / `agent_monitor_stop` to turn agent watching on or off.
-- Use `agent_monitor_configure` with 'toast', 'voice', or 'both' to change how alerts are delivered.
-- Use `install_agent_hooks` only when the user asks to set up or install agent monitoring globally.
+User: "Play" or "Resume"
+Your response: Resuming playback, sir.
+<tool_call>
+{{"name": "system_media_control", "arguments": {{"action": "play"}}}}
+</tool_call>
+
+User: "Previous track" or "Go back"
+Your response: Going to previous track, sir.
+<tool_call>
+{{"name": "system_media_control", "arguments": {{"action": "prev"}}}}
+</tool_call>
+
+User: "Play some Malayalam songs"
+Your response: Let me find some great Malayalam songs for you, sir.
+<tool_call>
+{{"name": "web_search", "arguments": {{"query": "best Malayalam songs 2024"}}}}
+</tool_call>
+[After getting results, pick a song and call:]
+<tool_call>
+{{"name": "search_spotify", "arguments": {{"query": "<song name from results>"}}}}
+</tool_call>
+
+
 
 # RULES FOR TOOL CALLING
 - NEVER output raw Python code, bash commands, or explain how to call a function.
@@ -821,6 +1034,34 @@ Your response: Right away, sir.
         cleaned = re.sub(r'<tool_call>\s*\{.*?\}\s*</tool_call>', '', text, flags=re.DOTALL)
         return cleaned.strip()
 
+    def _infer_media_action(self) -> str:
+        """Infer the intended media action from the most recent user message.
+
+        Called as a fallback when system_media_control is invoked with no
+        'action' argument — which happens when weak local models call the
+        tool but forget to include the parameter.
+        """
+        _NEXT  = {"next", "skip", "forward", "skip song", "next song", "another"}
+        _PREV  = {"prev", "previous", "back", "last", "go back", "previous song"}
+        _PAUSE = {"pause", "stop", "mute music", "quiet", "hold"}
+        _PLAY  = {"play", "resume", "continue", "unpause", "start music"}
+
+        # Scan backwards through history for the most recent user message
+        for msg in reversed(self.messages):
+            if msg.get("role") == "user":
+                text = msg.get("content", "").lower()
+                if any(w in text for w in _NEXT):
+                    return "next"
+                if any(w in text for w in _PREV):
+                    return "prev"
+                if any(w in text for w in _PAUSE):
+                    return "pause"
+                if any(w in text for w in _PLAY):
+                    return "play"
+                break  # Only check the most recent user message
+
+        return "play"  # safe default
+
     def _invoke_tool(self, func_name: str, func_args) -> str:
         """Executes a tool by name with loosely-formed arguments.
 
@@ -830,6 +1071,16 @@ Your response: Right away, sir.
         func = self.tool_functions.get(func_name)
         if func is None:
             return f"Error: unknown tool '{func_name}'."
+
+        # Smart fallback: local models sometimes call system_media_control with
+        # no arguments at all.  Infer the intended action from conversation context.
+        if func_name == "system_media_control":
+            args = dict(func_args) if func_args else {}
+            if not args.get("action"):
+                inferred = self._infer_media_action()
+                print(f"[SmartInfer] system_media_control missing 'action' — inferred: '{inferred}'")
+                args["action"] = inferred
+            func_args = args
 
         try:
             clean_args = coerce_tool_args(func, func_args)
@@ -902,16 +1153,39 @@ Your response: Right away, sir.
 
     def _process_input_local(self, user_text: str) -> str:
         """Process input using a local model with manual text-based tool calling.
-        
+
+        Builds a **targeted** system prompt per query that contains only the
+        tool descriptions relevant to the user's intent (via _classify_query).
+        This keeps the context window small and dramatically improves tool-call
+        accuracy on weaker local models.
+
         Instead of relying on the OpenAI tools API, we parse the model's text
         output for <tool_call> JSON blocks and execute them ourselves.
         """
         try:
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
+
+            # ── Build a targeted system prompt for this specific query ──────────
+            now_str = datetime.datetime.now().strftime('%A, %Y-%m-%d %H:%M:%S')
+            tools_text, matched_groups = self._build_local_tools_prompt_for_query(user_text)
+            targeted_sys_prompt = self._build_local_system_prompt(
+                now_str, self.truth_mode, tools_text=tools_text
+            )
+            print(f"[ToolRouter] Groups: {matched_groups} | Tools in prompt: {tools_text.count(chr(10)) + 1}")
+
+            # Replace only the system message; preserve the rest of the history
+            messages_for_call = [
+                {"role": "system", "content": targeted_sys_prompt},
+                *[m for m in self.messages if m.get("role") != "system"],
+                {"role": "user", "content": user_text},
+            ]
+
+            # Also persist the user message in the canonical history
             self.messages.append({"role": "user", "content": user_text})
 
             max_tool_rounds = 5  # Prevent infinite loops
             last_errors = []  # Tool failures from the most recent round
+            raw_text = ""
 
             for _ in range(max_tool_rounds):
                 # Call local model WITHOUT tools/tool_choice params
@@ -919,7 +1193,7 @@ Your response: Right away, sir.
                     try:
                         response = self.client.chat.completions.create(
                             model=self.selected_model,
-                            messages=self.messages,
+                            messages=messages_for_call,
                         )
                         if response and response.choices:
                             self._record_usage(response)
@@ -934,14 +1208,15 @@ Your response: Right away, sir.
                     return "The local AI model returned an empty response. Is Ollama running?"
 
                 raw_text = response.choices[0].message.content or ""
+                # Track in both the targeted call list and the canonical history
+                messages_for_call.append({"role": "assistant", "content": raw_text})
                 self.messages.append({"role": "assistant", "content": raw_text})
 
                 # Parse tool calls from the text
                 tool_calls = self._parse_tool_calls_from_text(raw_text)
 
                 if not tool_calls:
-                    # No tool calls — this is the final response. Never let a
-                    # failed tool be reported to the user as a bare "Done."
+                    # No tool calls — this is the final response.
                     clean_text = self._strip_tool_calls_from_text(raw_text)
                     if not clean_text:
                         clean_text = ("Sir, that did not go through: " + " ".join(last_errors)
@@ -965,9 +1240,15 @@ Your response: Right away, sir.
 
                     results_text_parts.append(f"[Tool Result for {func_name}]: {result}")
 
-                # Feed tool results back as a user message so the model can respond
+                # Feed tool results back so the model can compose a reply
                 tool_results_msg = "\n".join(results_text_parts)
-                self.messages.append({"role": "user", "content": f"Tool execution results:\n{tool_results_msg}\n\nNow provide a brief, friendly response to the user about what was done. Do NOT call any more tools unless necessary."})
+                followup = {"role": "user", "content": (
+                    f"Tool execution results:\n{tool_results_msg}\n\n"
+                    "Now provide a brief, friendly response to the user about what was done. "
+                    "Do NOT call any more tools unless necessary."
+                )}
+                messages_for_call.append(followup)
+                self.messages.append(followup)
 
             # If we hit the max rounds, return the last response
             clean = self._strip_tool_calls_from_text(raw_text) or "Done."
