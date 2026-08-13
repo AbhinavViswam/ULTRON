@@ -27,5 +27,6 @@
     "x": -33,
     "y": 664
   },
-  "local_api_url": "http://localhost:11434/v1"
+  "local_api_url": "http://localhost:11434/v1",
+  "filter_local_tools": false
 }

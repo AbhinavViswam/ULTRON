@@ -8,6 +8,7 @@
   "local_api_url": "http://localhost:11434/v1",
   "microphone_active": true,
   "truth_mode": false,
+  "filter_local_tools": false,
   "cron_jobs": {
     "unread_emails_check": {
       "enabled": false,

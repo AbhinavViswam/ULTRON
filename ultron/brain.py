@@ -1181,13 +1181,24 @@ Your response: Let me find some great Malayalam songs for you, sir.
         try:
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
 
-            # ── Build a targeted system prompt for this specific query ──────────
+            # ── Build the system prompt for this query ──────────────────────────
             now_str = datetime.datetime.now().strftime('%A, %Y-%m-%d %H:%M:%S')
-            tools_text, matched_groups = self._build_local_tools_prompt_for_query(user_text)
+
+            # Every tool, every turn, by default. Keyword routing could only
+            # ever guess: a phrase that matched the wrong group left the model
+            # unable to do the job with no way to recover. Set
+            # "filter_local_tools": true to trade that risk back for a shorter
+            # prompt on a model that struggles with the full list.
+            if config.get("filter_local_tools", False):
+                tools_text, matched_groups = self._build_local_tools_prompt_for_query(user_text)
+                print(f"[ToolRouter] Groups: {matched_groups} | "
+                      f"Tools in prompt: {tools_text.count(chr(10)) + 1}")
+            else:
+                tools_text = self._build_local_tools_prompt()
+
             targeted_sys_prompt = self._build_local_system_prompt(
                 now_str, self.truth_mode, tools_text=tools_text
             )
-            print(f"[ToolRouter] Groups: {matched_groups} | Tools in prompt: {tools_text.count(chr(10)) + 1}")
 
             # Replace only the system message; preserve the rest of the history
             messages_for_call = [
