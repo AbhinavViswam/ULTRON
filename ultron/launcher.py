@@ -70,15 +70,34 @@ def launch_target():
     return pythonw, f'"{os.path.join(PROJECT_ROOT, "gui.py")}"'
 
 
+def _special_folder(name: str, fallback: str) -> str:
+    """Resolves a Windows shell folder, honouring any redirection.
+
+    OneDrive's "known folder move" repoints Desktop at
+    %USERPROFILE%\\OneDrive\\Desktop, so assuming ~/Desktop writes shortcuts
+    to a folder the user may never see — and leaves the real one unfindable
+    when removing them.
+    """
+    try:
+        import win32com.client
+
+        path = win32com.client.Dispatch("WScript.Shell").SpecialFolders(name)
+        if path and os.path.isdir(path):
+            return path
+    except Exception:
+        pass
+    return fallback
+
+
 def startup_dir() -> str:
-    return os.path.join(
+    return _special_folder("Startup", os.path.join(
         os.environ.get("APPDATA", ""),
         "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
-    )
+    ))
 
 
 def desktop_dir() -> str:
-    return os.path.join(os.path.expanduser("~"), "Desktop")
+    return _special_folder("Desktop", os.path.join(os.path.expanduser("~"), "Desktop"))
 
 
 def ensure_icon() -> str:
