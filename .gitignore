@@ -10,3 +10,6 @@ usage.json
 keys.json
 # User config (settings.default.json is the tracked template)
 settings.json
+
+# Build output
+dist/

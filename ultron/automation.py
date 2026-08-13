@@ -1,7 +1,202 @@
 import os
 import subprocess
 import ctypes
+import winreg
 from playwright.sync_api import sync_playwright
+
+# ---------------------------------------------------------------------------
+# Locating folders
+# ---------------------------------------------------------------------------
+
+# Windows lets users move these, and OneDrive's "known folder move" routinely
+# repoints Desktop, Documents and Pictures into the OneDrive tree. Building
+# them from the home directory opens an empty leftover folder instead of the
+# real one, so the actual location is read from the registry.
+_USER_SHELL_FOLDERS = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+)
+
+_KNOWN_FOLDER_KEYS = {
+    "desktop": "Desktop",
+    "documents": "Personal",
+    "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "pictures": "My Pictures",
+    "music": "My Music",
+    "videos": "My Video",
+}
+
+# Directories that are never what a person means and cost a fortune to walk.
+_SEARCH_SKIP = {
+    "windows", "program files", "program files (x86)", "programdata",
+    "$recycle.bin", "system volume information", "appdata", "node_modules",
+    "__pycache__", "venv", ".venv", ".git", "site-packages", "recovery",
+    "perflogs", ".cache", "dist", "build",
+}
+
+# Bounds on the folder hunt, so a miss cannot hang the assistant.
+_SEARCH_MAX_DEPTH = 5
+_SEARCH_MAX_DIRS = 40000
+# Wall-clock ceiling. Tool calls run on the thread serving the user and have
+# no timeout around them, so the search stops and answers with what it has.
+_SEARCH_MAX_SECONDS = 5.0
+# Enough exact hits to judge whether the request was ambiguous.
+_SEARCH_ENOUGH_EXACT = 5
+
+
+# Words people attach when naming a folder out loud.
+_TRAILING_WORDS = ("folder", "folders", "directory", "dir")
+_LEADING_WORDS = ("the", "my", "a", "folder", "directory", "dir")
+
+
+def _clean_folder_name(text: str) -> str:
+    """Reduces a spoken phrase to a name: 'the ultron folder' -> 'ultron'."""
+    cleaned = (text or "").strip().strip("\"'").strip()
+    changed = True
+    while changed and cleaned:
+        changed = False
+        lowered = cleaned.lower()
+        for word in _TRAILING_WORDS:
+            if lowered.endswith(" " + word):
+                cleaned = cleaned[: -(len(word) + 1)].strip()
+                changed = True
+                break
+        lowered = cleaned.lower()
+        for word in _LEADING_WORDS:
+            if lowered.startswith(word + " "):
+                cleaned = cleaned[len(word) + 1:].strip()
+                changed = True
+                break
+    return cleaned
+
+
+def _looks_like_path(text: str) -> bool:
+    """True only for something meant as a path, not a bare folder name.
+
+    A bare name must not be resolved against the working directory: launched
+    from its shortcut Ultron runs inside its own project, so 'ultron' would
+    quietly resolve to the package folder nested inside it rather than the
+    folder the user meant.
+    """
+    return bool(
+        os.path.isabs(text)
+        or text.startswith("~")
+        or "/" in text
+        or "\\" in text
+    )
+
+
+def known_folder(name: str) -> str:
+    """Returns the real path of a shell folder like 'desktop', or ''.
+
+    Deliberately duplicated in spirit by launcher.py, which resolves the same
+    idea for shortcuts; that module is imported at startup and must not pull
+    in this one's heavy dependencies.
+    """
+    key_name = _KNOWN_FOLDER_KEYS.get(name.strip().lower().rstrip("/\\"))
+    if not key_name:
+        return ""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _USER_SHELL_FOLDERS) as key:
+            value, _ = winreg.QueryValueEx(key, key_name)
+        path = os.path.expandvars(value)
+        if os.path.isdir(path):
+            return path
+    except OSError:
+        pass
+
+    fallback = os.path.join(os.path.expanduser("~"), name.capitalize())
+    return fallback if os.path.isdir(fallback) else ""
+
+
+def _search_roots():
+    """Where to hunt for a folder given only its name, nearest first."""
+    roots = [os.path.expanduser("~")]
+    for letter in "CDEFGH":
+        drive = f"{letter}:\\"
+        if os.path.isdir(drive):
+            roots.append(drive)
+    return roots
+
+
+def _prune(matches: list) -> list:
+    """Keeps the outermost matches, shallowest first.
+
+    Searching for 'ultron' hits both the project and the package folder nested
+    inside it. Offering both as a choice is noise — the enclosing one is what
+    was meant, and the other is reachable from it.
+    """
+    ordered = sorted(set(matches), key=lambda p: (p.count(os.sep), len(p)))
+    kept = []
+    for path in ordered:
+        if not any(path.lower().startswith(k.lower() + os.sep) for k in kept):
+            kept.append(path)
+    return kept
+
+
+def find_folders(name: str, limit: int = 8) -> list:
+    """Finds directories called `name`, searching the user profile then drives.
+
+    Exact name matches win outright; partial matches are only offered when
+    nothing matched exactly. Bounded by depth, directories visited and
+    wall-clock, because this runs on the thread serving the user.
+    """
+    import time
+
+    target = name.strip().strip("\"'").lower()
+    if not target:
+        return []
+
+    exact, partial = [], []
+    seen = set()
+    visited = 0
+    deadline = time.monotonic() + _SEARCH_MAX_SECONDS
+
+    for root in _search_roots():
+        stack = [(root, 0)]
+        while stack:
+            if time.monotonic() > deadline or visited > _SEARCH_MAX_DIRS:
+                stack.clear()
+                break
+
+            current, depth = stack.pop()
+            if depth > _SEARCH_MAX_DEPTH:
+                continue
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            visited += 1
+
+            for entry in entries:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+
+                lowered = entry.name.lower()
+                if lowered in _SEARCH_SKIP or lowered.startswith("$"):
+                    continue
+                # Hidden and tooling directories are never the answer unless
+                # the user named them exactly.
+                if lowered.startswith(".") and lowered != target:
+                    continue
+
+                resolved = os.path.normpath(entry.path)
+                key = resolved.lower()
+                if key not in seen:
+                    if lowered == target:
+                        seen.add(key)
+                        exact.append(resolved)
+                    elif target in lowered:
+                        seen.add(key)
+                        partial.append(resolved)
+
+                if len(exact) >= _SEARCH_ENOUGH_EXACT:
+                    return _prune(exact)[:limit]
+                stack.append((entry.path, depth + 1))
+
+    return _prune(exact or partial)[:limit]
 
 # Comprehensive list of allowed Windows desktop applications
 ALLOWED_APPS = {
@@ -683,14 +878,12 @@ def find_files(search_query: str, location: str = 'Desktop') -> str:
         location: 'Desktop', 'Downloads', or 'Documents'.
     """
     try:
-        user_home = os.path.expanduser("~")
-        loc_map = {
-            'desktop': os.path.join(user_home, 'Desktop'),
-            'downloads': os.path.join(user_home, 'Downloads'),
-            'documents': os.path.join(user_home, 'Documents')
-        }
-        target_dir = loc_map.get(location.lower(), os.path.join(user_home, 'Desktop'))
-        
+        # Resolved through the registry so a OneDrive-redirected Desktop or
+        # Documents is searched, not an empty leftover folder.
+        target_dir = known_folder(location) or known_folder("desktop")
+        if not target_dir:
+            return f"Could not locate the {location} folder on this computer."
+
         matches = []
         for root, _, files in os.walk(target_dir):
             for file in files:
@@ -856,26 +1049,56 @@ def list_directory(path: str = ".") -> str:
         return f"Failed to list directory: {e}"
 
 def open_folder(path: str) -> str:
-    """Opens a folder in the native Windows File Explorer.
+    """Opens a folder in Windows File Explorer.
+
+    Accepts a full path ('C:/projects/ultron'), a shell folder name
+    ('Downloads', 'Desktop', 'Documents', 'Pictures', 'Music', 'Videos'), or
+    just the folder's name ('ultron') — an unknown name is searched for on the
+    user's drives, so you do NOT need to ask the user for a full path first.
+
     Args:
-        path: Path to the folder (e.g., 'Downloads', 'Desktop', or 'C:/path/to/folder').
+        path: Folder path, shell folder name, or plain folder name.
     """
     try:
-        user_home = os.path.expanduser("~")
-        if path.lower() in ['desktop', 'desktop/']:
-            target_path = os.path.join(user_home, 'Desktop')
-        elif path.lower() in ['downloads', 'downloads/']:
-            target_path = os.path.join(user_home, 'Downloads')
-        elif path.lower() in ['documents', 'documents/']:
-            target_path = os.path.join(user_home, 'Documents')
-        else:
-            target_path = path
+        query = (path or "").strip().strip("\"'")
+        if not query:
+            return "No folder was given."
 
-        if not os.path.exists(target_path):
-            return f"Folder does not exist: '{target_path}'"
+        missed_path = ""
+        if _looks_like_path(query):
+            expanded = os.path.expanduser(os.path.expandvars(query))
+            if os.path.isdir(expanded):
+                resolved = os.path.abspath(expanded)
+                os.startfile(resolved)
+                return f"Successfully opened folder: '{resolved}'"
+            # Fall through and search on the final component, but remember
+            # that what opens is not what was asked for.
+            missed_path = query
+            query = os.path.basename(os.path.normpath(expanded)) or query
 
-        os.startfile(target_path)
-        return f"Successfully opened folder: '{target_path}'"
+        name = _clean_folder_name(query)
+
+        shell_folder = known_folder(name)
+        if shell_folder:
+            os.startfile(shell_folder)
+            return f"Successfully opened folder: '{shell_folder}'"
+
+        # Treat it as a name and go looking, rather than bouncing the question
+        # back to the user.
+        matches = find_folders(name)
+        if not matches:
+            return (f"No folder named '{name}' was found on this computer. "
+                    f"Ask the user for the full path.")
+
+        if len(matches) == 1:
+            os.startfile(matches[0])
+            if missed_path:
+                return (f"'{missed_path}' does not exist. Opened the closest "
+                        f"match instead: '{matches[0]}'. Tell the user this.")
+            return f"Successfully opened folder: '{matches[0]}'"
+
+        listed = "\n".join(f"- {m}" for m in matches)
+        return (f"Several folders match '{name}'. Ask the user which one:\n{listed}")
     except Exception as e:
         return f"Failed to open folder: {e}"
 

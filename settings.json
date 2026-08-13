@@ -1,7 +1,7 @@
 {
-  "openrouterapi": true,
+  "openrouterapi": false,
   "geminiapi": false,
-  "localapi": false,
+  "localapi": true,
   "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "gemini_model": "gemini-3.5-flash",
   "local_model": "gemma4:e2b",
@@ -24,8 +24,8 @@
     "pending_tool_seconds": 10
   },
   "overlay_position": {
-    "x": 1287,
-    "y": 70
+    "x": -33,
+    "y": 664
   },
   "local_api_url": "http://localhost:11434/v1"
 }
