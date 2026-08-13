@@ -23,11 +23,18 @@ class OutputManager:
         self._consumer_thread.start()
 
     def on_message(self, callback):
-        """Registers a callback invoked as each message is spoken.
+        """Registers a callback invoked as each message is *accepted*.
 
-        Signature: callback(text, source). Lets a GUI render messages as they
-        surface without the console being the only output path. Callbacks run
-        on the consumer thread, so a UI must marshal to its own thread.
+        Signature: callback(text, source).
+
+        Deliberately fires at enqueue time rather than when the message is
+        spoken. Speech is serialised through one consumer, so a reply queued
+        behind a loading phrase would otherwise be withheld from the screen
+        for as long as that phrase takes to say — measured at 1-2 seconds,
+        which reads as the assistant being slow when it has already answered.
+
+        Callbacks run on whichever thread enqueued, so a UI must marshal to
+        its own thread.
         """
         self._listeners.append(callback)
         return callback
@@ -56,7 +63,20 @@ class OutputManager:
             source:    One of "user", "system", or "cron".
             print_msg: Whether to print the message to the console.
         """
+        if message and message.strip():
+            self._announce(message, source, print_msg)
         self._queue.put({"text": message, "source": source, "print": print_msg})
+
+    def _announce(self, text: str, source: str, should_print: bool):
+        """Shows a message immediately; speaking it happens separately."""
+        if should_print and self.echo_to_console:
+            print(f"\nUltron: {text}")
+
+        for callback in list(self._listeners):
+            try:
+                callback(text, source)
+            except Exception as e:
+                print(f"[OutputManager] Listener error: {e}")
 
     def interrupt(self):
         """Immediately stops current speech and discards all pending cron
@@ -103,20 +123,12 @@ class OutputManager:
                 break
 
             text = item["text"]
-            source = item["source"]
-            should_print = item["print"]
 
             if not text or not text.strip():
                 continue
 
-            if should_print and self.echo_to_console:
-                print(f"\nUltron: {text}")
-
-            for callback in list(self._listeners):
-                try:
-                    callback(text, source)
-                except Exception as e:
-                    print(f"[OutputManager] Listener error: {e}")
+            # Displaying already happened at enqueue time; this thread only
+            # has to say it.
 
             # Speak synchronously — blocks until finished or interrupted
             # Capture the current speech_id; if it changes mid-speech the

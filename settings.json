@@ -16,15 +16,16 @@
   "truth_mode": true,
   "agent_monitor": {
     "enabled": true,
-    "port": 8787,
-    "alert_mode": "both",
+    "port": 8784,
+    "alert_mode": "voice",
     "min_run_seconds": 10,
     "escalate_seconds": 120,
     "alert_when_focused": true,
     "pending_tool_seconds": 10
   },
   "overlay_position": {
-    "x": 246,
-    "y": 410
-  }
+    "x": 1287,
+    "y": 70
+  },
+  "local_api_url": "http://localhost:11434/v1"
 }
