@@ -3,9 +3,11 @@
   "geminiapi": false,
   "localapi": false,
   "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "gemini_model": "gemini-3.5-flash",
+  "gemini_model": "gemini-2.5-flash",
   "local_model": "gemma4:e2b",
+  "local_api_url": "http://localhost:11434/v1",
   "microphone_active": true,
+  "truth_mode": false,
   "cron_jobs": {
     "unread_emails_check": {
       "enabled": false,
@@ -13,7 +15,6 @@
       "notify_popup": false
     }
   },
-  "truth_mode": true,
   "agent_monitor": {
     "enabled": true,
     "port": 8787,
@@ -22,9 +23,5 @@
     "escalate_seconds": 120,
     "alert_when_focused": true,
     "pending_tool_seconds": 10
-  },
-  "overlay_position": {
-    "x": 246,
-    "y": 410
   }
 }

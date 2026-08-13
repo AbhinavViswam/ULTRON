@@ -6,6 +6,7 @@ import inspect
 import json
 from openai import OpenAI
 
+from ultron.config import config, PROVIDER_KEYS
 from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
@@ -356,76 +357,67 @@ class ToolBridge:
 
 
 class Brain:
-    def __init__(self):
-        self.session_id = str(uuid.uuid4())
-        
-                
-        # Load Settings
-        settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
-        try:
-            with open(settings_path, "r") as f:
-                settings = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            settings = {"openrouterapi": True, "geminiapi": False}
-            
-        # Load API Keys
-        keys_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "keys.json")
-        try:
-            with open(keys_path, "r") as f:
-                api_keys = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            api_keys = {}
-            
-        # Select the first API set to true
-        active_api = None
-        for api_name in ["openrouterapi", "geminiapi", "localapi"]:
-            if settings.get(api_name) is True:
-                active_api = api_name
-                break
-                
-        if not active_api:
-            active_api = "openrouterapi"
-            
-        self.active_api = active_api
-        self.db = Database()
-        self.browser = BrowserManager()
-        self.truth_mode = settings.get("truth_mode", False)
-        
-        if active_api == "openrouterapi":
-            api_key = api_keys.get("openrouter")
-            if not api_key:
-                raise ValueError("openrouter API key is not set correctly in keys.json.")
-                
-            self.client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=api_key,
-            )
-            self.selected_model = settings.get("openrouter_model") or settings.get("model") or "nvidia/nemotron-3-ultra-550b-a55b:free"
-            print("\nUltron AI Provider: OpenRouter Mode")
-            
-        elif active_api == "geminiapi":
-            api_key = api_keys.get("google")
-            if not api_key:
-                raise ValueError("google API key is not set correctly in keys.json.")
-                
-            self.client = OpenAI(
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=api_key,
-            )
-            self.selected_model = settings.get("gemini_model") or settings.get("model") or "gemini-2.5-flash"
-            print("\nUltron AI Provider: Gemini Mode")
-        elif active_api == "localapi":
-            self.client = OpenAI(
-                base_url=settings.get("local_api_url", "http://localhost:11434/v1"),
+    # Base URLs per provider. The local provider's URL is configurable.
+    PROVIDER_BASE_URLS = {
+        "openrouterapi": "https://openrouter.ai/api/v1",
+        "geminiapi": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    }
+
+    PROVIDER_LABELS = {
+        "openrouterapi": "OpenRouter",
+        "geminiapi": "Gemini",
+        "localapi": "Local",
+    }
+
+    @property
+    def truth_mode(self) -> bool:
+        """Read live so toggling it in settings takes effect immediately."""
+        return bool(config.get("truth_mode", False))
+
+    def _configure_provider(self, verbose: bool = True):
+        """Builds the OpenAI-compatible client for the active provider.
+
+        Called at startup and again on any config change, so switching
+        provider or model does not require a restart.
+        """
+        provider = config.active_provider()
+        model = config.model_for(provider)
+
+        if provider == "localapi":
+            client = OpenAI(
+                base_url=config.get("local_api_url", "http://localhost:11434/v1"),
                 api_key="ollama",
             )
-            self.selected_model = settings.get("local_model") or settings.get("model") or "gemma4:e2b"
-            print("\nUltron AI Provider: Local Mode")
+        elif provider in self.PROVIDER_BASE_URLS:
+            key_name = PROVIDER_KEYS[provider]
+            api_key = config.get_key(key_name)
+            if not api_key:
+                raise ValueError(f"{key_name} API key is not set correctly in keys.json.")
+            client = OpenAI(base_url=self.PROVIDER_BASE_URLS[provider], api_key=api_key)
         else:
-            raise ValueError(f"Unsupported API selected in settings: {active_api}")
-            
-        print(f"Selected Model: {self.selected_model}")
-        
+            raise ValueError(f"Unsupported API selected in settings: {provider}")
+
+        changed = getattr(self, "active_api", None) != provider or getattr(self, "selected_model", None) != model
+        self.active_api = provider
+        self.selected_model = model
+        self.client = client
+
+        if verbose or changed:
+            print(f"\nUltron AI Provider: {self.PROVIDER_LABELS[provider]} Mode")
+            print(f"Selected Model: {self.selected_model}")
+
+    def __init__(self):
+        self.session_id = str(uuid.uuid4())
+        self._tool_listeners = []
+
+        self.db = Database()
+        self.browser = BrowserManager()
+
+        # Build the LLM client from settings, and rebuild it whenever the
+        # provider, model, or API keys change on disk or via the UI.
+        self._configure_provider()
+        config.on_change(lambda _cfg: self._configure_provider(verbose=False))
+
         # Define memory tools
         def save_memory(category: str, key: str, value: str, importance: int) -> str:
             """Saves a memory for the user. Call this when the user asks you to remember something."""
@@ -766,7 +758,7 @@ Examples of autonomous behaviour:
 - READING DOCUMENTS: Use `read_document` to read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP). For images, it extracts text using OCR. If a PDF/DOCX is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
 - DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
-- POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
+- POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, schedule system shutdown, or cancel a scheduled shutdown.
 - GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
 - DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images.
 - QUICK WEB SEARCH: For quick facts, current events, or real-time data, use `web_search` to query the internet and answer the user directly. If the search fails (e.g., no internet), fall back to answering from your training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST tell the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data. If you need more details from a specific page, use `research_read_url`.
@@ -1062,6 +1054,23 @@ Your response: Let me find some great Malayalam songs for you, sir.
 
         return "play"  # safe default
 
+    def on_tool_event(self, callback):
+        """Registers callback(phase, name, detail) for every tool invocation.
+
+        phase is "start" or "end"; on "end", detail is True when the tool
+        succeeded. Every tool call from both the cloud and local paths funnels
+        through _invoke_tool, so this sees all of them.
+        """
+        self._tool_listeners.append(callback)
+        return callback
+
+    def _emit_tool_event(self, phase: str, name: str, detail=None):
+        for callback in list(self._tool_listeners):
+            try:
+                callback(phase, name, detail)
+            except Exception as e:
+                print(f"[Brain] Tool listener error: {e}")
+
     def _invoke_tool(self, func_name: str, func_args) -> str:
         """Executes a tool by name with loosely-formed arguments.
 
@@ -1087,10 +1096,17 @@ Your response: Let me find some great Malayalam songs for you, sir.
         except ValueError as e:
             return f"Error: {e}"
 
+        self._emit_tool_event("start", func_name)
         try:
-            return func(**clean_args)
+            result = func(**clean_args)
         except Exception as e:
+            self._emit_tool_event("end", func_name, False)
             return f"Error executing {func_name}: {e}"
+
+        # A tool can report failure in its return string without raising.
+        ok = not (isinstance(result, str) and result.startswith("Error"))
+        self._emit_tool_event("end", func_name, ok)
+        return result
 
     def _record_usage(self, response):
         """Records token usage from the API response into usage.json."""

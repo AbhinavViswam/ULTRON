@@ -8,3 +8,5 @@ credentials.json
 token.json
 usage.json
 keys.json
+# User config (settings.default.json is the tracked template)
+settings.json

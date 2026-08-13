@@ -12,12 +12,37 @@ class OutputManager:
         - "cron"   : Lowest. Queued notifications. Cleared on user interrupt.
     """
 
-    def __init__(self, speaker):
+    def __init__(self, speaker, echo_to_console: bool = True):
         self.speaker = speaker
+        self.echo_to_console = echo_to_console
         self._queue = queue.Queue()
         self._running = True
+        self._listeners = []
+        self._speaking_listeners = []
         self._consumer_thread = threading.Thread(target=self._consumer_loop, daemon=True)
         self._consumer_thread.start()
+
+    def on_message(self, callback):
+        """Registers a callback invoked as each message is spoken.
+
+        Signature: callback(text, source). Lets a GUI render messages as they
+        surface without the console being the only output path. Callbacks run
+        on the consumer thread, so a UI must marshal to its own thread.
+        """
+        self._listeners.append(callback)
+        return callback
+
+    def on_speaking_changed(self, callback):
+        """Registers callback(is_speaking), bracketing each spoken message."""
+        self._speaking_listeners.append(callback)
+        return callback
+
+    def _emit_speaking(self, speaking: bool):
+        for callback in list(self._speaking_listeners):
+            try:
+                callback(speaking)
+            except Exception as e:
+                print(f"[OutputManager] Speaking listener error: {e}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -84,11 +109,21 @@ class OutputManager:
             if not text or not text.strip():
                 continue
 
-            if should_print:
+            if should_print and self.echo_to_console:
                 print(f"\nUltron: {text}")
+
+            for callback in list(self._listeners):
+                try:
+                    callback(text, source)
+                except Exception as e:
+                    print(f"[OutputManager] Listener error: {e}")
 
             # Speak synchronously — blocks until finished or interrupted
             # Capture the current speech_id; if it changes mid-speech the
             # speaker will abort automatically.
             current_id = self.speaker.speech_id
-            self.speaker.speak(text, current_id)
+            self._emit_speaking(True)
+            try:
+                self.speaker.speak(text, current_id)
+            finally:
+                self._emit_speaking(False)

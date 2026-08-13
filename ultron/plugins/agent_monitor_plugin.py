@@ -39,6 +39,7 @@ import threading
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from ultron.config import config
 from ultron.plugins.notification_plugin import send_toast
 
 
@@ -90,19 +91,8 @@ def _label_from_cwd(cwd: str) -> str:
     return os.path.basename(os.path.normpath(cwd)) or cwd
 
 
-def _settings_path() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "settings.json",
-    )
-
-
 def _load_settings() -> dict:
-    try:
-        with open(_settings_path(), "r", encoding="utf-8") as f:
-            return json.load(f).get("agent_monitor", {}) or {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+    return config.get("agent_monitor", {}) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -485,17 +475,8 @@ def agent_monitor_configure(alert_mode: str) -> str:
     if mode not in ("toast", "voice", "both"):
         return "alert_mode must be one of: toast, voice, both."
 
-    path = _settings_path()
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            settings = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        settings = {}
-
-    settings.setdefault("agent_monitor", {})["alert_mode"] = mode
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2)
+        config.set("agent_monitor.alert_mode", mode)
     except OSError as e:
         return f"Could not save the setting: {e}"
 

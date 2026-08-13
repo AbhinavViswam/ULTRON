@@ -15,6 +15,24 @@ class VoiceListener:
         self.is_listening = False
         self.thread = None
         self.speech_threshold = 15.0
+        self._level_listeners = []
+
+    def on_level(self, callback):
+        """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
+
+        Reuses the RMS the voice detector already computes, so a UI can show
+        the microphone reacting without opening a second audio stream.
+        Fires on the audio thread; keep the callback cheap.
+        """
+        self._level_listeners.append(callback)
+        return callback
+
+    def _emit_level(self, level: float, is_speech: bool):
+        for callback in list(self._level_listeners):
+            try:
+                callback(level, is_speech)
+            except Exception:
+                pass
 
     def calibrate(self):
         """Calibrates background ambient noise for 0.8 seconds to set dynamic speech threshold."""
@@ -44,7 +62,13 @@ class VoiceListener:
             rms = float(np.sqrt(np.mean(indata.astype(float)**2)))
             
             nonlocal is_speaking, silence_start, buffer
-            
+
+            if self._level_listeners:
+                # Scale against the calibrated threshold so the reported level
+                # means the same thing in a quiet room and a noisy one.
+                reference = max(self.speech_threshold * 4.0, 200.0)
+                self._emit_level(min(1.0, rms / reference), rms > self.speech_threshold)
+
             # Compare against dynamic speech threshold
             if rms > self.speech_threshold:
                 if not is_speaking:

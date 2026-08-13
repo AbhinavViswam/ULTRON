@@ -725,9 +725,9 @@ def read_file_content(file_path: str) -> str:
         return f"Failed to read file content: {e}"
 
 def system_power_control(action: str) -> str:
-    """Performs system power actions: lock, sleep, or shutdown.
+    """Performs system power actions: lock, sleep, shutdown, or cancel_shutdown.
     Args:
-        action: 'lock', 'sleep', or 'shutdown'
+        action: 'lock', 'sleep', 'shutdown', or 'cancel_shutdown'
     """
     action = action.lower().strip()
     try:

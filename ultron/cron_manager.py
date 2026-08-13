@@ -1,9 +1,8 @@
-import os
 import time
-import json
 import ctypes
 import threading
 import datetime
+from ultron.config import config
 from ultron.plugins.gmail_plugin import get_unread_emails_count
 from ultron.plugins.notification_plugin import send_toast
 
@@ -57,16 +56,9 @@ class CronManager:
             print(f"[Cron Error] Failed unread email check: {e}")
             
     def _load_cron_jobs(self):
-        """Loads cron_jobs configuration from settings.json."""
-        settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
-        try:
-            if os.path.exists(settings_path):
-                with open(settings_path, "r") as f:
-                    settings = json.load(f)
-                    return settings.get("cron_jobs", {})
-        except Exception as e:
-            print(f"[Cron Warning] Could not load cron jobs from settings.json: {e}")
-        return {}
+        """Loads cron_jobs configuration. Config reloads itself on disk change,
+        so edits made by hand or through the UI are picked up each tick."""
+        return config.get("cron_jobs", {}) or {}
 
     def _loop(self):
         """Main background scheduler loop checking job intervals."""
