@@ -24,8 +24,8 @@
     "pending_tool_seconds": 10
   },
   "overlay_position": {
-    "x": -33,
-    "y": 664
+    "x": 552,
+    "y": 207
   },
   "local_api_url": "http://localhost:11434/v1",
   "filter_local_tools": false

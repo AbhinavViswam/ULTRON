@@ -296,6 +296,68 @@ APP_PROCESS_NAMES = {
     "minecraft": "Minecraft.exe"
 }
 
+# Virtual-key codes for every modifier that can be left held down, plus the
+# mouse buttons. A stuck modifier is invisible: the desktop simply starts
+# misbehaving (drag-select picks whole words, clicks multi-select, Win+V dies)
+# with nothing on screen to explain it.
+_STICKY_KEYS = {
+    "Ctrl": 0x11, "Shift": 0x10, "Alt": 0x12,
+    "LeftCtrl": 0xA2, "RightCtrl": 0xA3,
+    "LeftShift": 0xA0, "RightShift": 0xA1,
+    "LeftAlt": 0xA4, "RightAlt": 0xA5,
+    "LeftWin": 0x5B, "RightWin": 0x5C,
+}
+_KEYEVENTF_KEYUP = 0x0002
+_MOUSEEVENTF_LEFTUP = 0x0004
+_MOUSEEVENTF_RIGHTUP = 0x0010
+_MOUSEEVENTF_MIDDLEUP = 0x0040
+
+
+def keys_currently_held() -> list:
+    """Names of modifiers and mouse buttons Windows thinks are down."""
+    user32 = ctypes.windll.user32
+    held = [name for name, vk in _STICKY_KEYS.items()
+            if user32.GetAsyncKeyState(vk) & 0x8000]
+    for name, vk in (("LeftMouse", 0x01), ("RightMouse", 0x02), ("MiddleMouse", 0x04)):
+        if user32.GetAsyncKeyState(vk) & 0x8000:
+            held.append(name)
+    return held
+
+
+def release_stuck_keys() -> str:
+    """Releases any modifier key or mouse button left held down.
+
+    Automating a hotkey means pressing a modifier, pressing a key, then
+    releasing both. If anything fails in between — the target window steals
+    focus, the app is not ready — the release never happens and the key stays
+    down for every other program on the machine. This puts it right.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        held = keys_currently_held()
+
+        for vk in _STICKY_KEYS.values():
+            user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+        for flag in (_MOUSEEVENTF_LEFTUP, _MOUSEEVENTF_RIGHTUP, _MOUSEEVENTF_MIDDLEUP):
+            user32.mouse_event(flag, 0, 0, 0, 0)
+
+        if not held:
+            return "No keys were stuck; released the modifiers anyway."
+        return f"Released stuck input: {', '.join(held)}."
+    except Exception as e:
+        return f"Failed to release keys: {e}"
+
+
+def _release_quietly():
+    """Best-effort cleanup for the finally block of a keyboard automation."""
+    try:
+        user32 = ctypes.windll.user32
+        for vk in _STICKY_KEYS.values():
+            user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+    except Exception:
+        pass
+
+
 def open_application(app_name: str, file_path: str = None) -> str:
     """Opens any desktop application (e.g. 'excel', 'settings', 'word', 'chrome', 'calculator').
     Args:
@@ -811,6 +873,10 @@ def write_in_notepad(text: str, filename: str = None) -> str:
         return "Successfully typed text into Notepad."
     except Exception as e:
         return f"Failed to write in Notepad: {e}"
+    finally:
+        # A hotkey that failed between press and release would leave Ctrl down
+        # across the whole desktop.
+        _release_quietly()
 
 def send_whatsapp_message(contact_name: str, message: str) -> str:
     """Opens WhatsApp Desktop, searches for contact_name, types the message, and sends it.
@@ -847,6 +913,8 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         return f"Successfully sent WhatsApp message to '{contact_name}': '{message}'"
     except Exception as e:
         return f"Failed to send WhatsApp message: {e}"
+    finally:
+        _release_quietly()
 
 def read_clipboard() -> str:
     """Reads and returns text currently copied to the Windows Clipboard."""

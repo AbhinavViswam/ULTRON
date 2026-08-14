@@ -19,6 +19,7 @@ All callbacks fire on background threads. A GUI must marshal them onto its
 own event loop.
 """
 
+import calendar
 import datetime
 import queue
 import random
@@ -126,8 +127,52 @@ _RECURRENCE_DELTAS = {
     "hourly": datetime.timedelta(hours=1),
     "daily": datetime.timedelta(days=1),
     "weekly": datetime.timedelta(weeks=1),
-    "monthly": datetime.timedelta(days=30),
 }
+
+
+def _add_month(moment: datetime.datetime) -> datetime.datetime:
+    """Steps to the same day of the following month.
+
+    A fixed 30-day delta is not a month: it walks a reminder set for the 1st
+    backwards to the 31st, then the 30th, and so on around the calendar.
+    Months of unequal length are handled by clamping — the 31st becomes the
+    30th in a 30-day month, and the 28th or 29th in February.
+    """
+    month = moment.month % 12 + 1
+    year = moment.year + (1 if moment.month == 12 else 0)
+    day = min(moment.day, calendar.monthrange(year, month)[1])
+    return moment.replace(year=year, month=month, day=day)
+
+
+def next_occurrence(scheduled_for: str, frequency: str) -> datetime.datetime:
+    """Advances a recurring reminder from its own schedule, never from now.
+
+    Stepping from the current time moves the reminder permanently: a 10:30
+    daily reminder that only fired at 12:30 — because Ultron was closed at
+    10:30 — would become a 12:30 reminder, and drift further every day.
+    Stepping from the time it was *meant* to run keeps it at 10:30 and simply
+    skips over the slots that were missed, so a week away still produces one
+    reminder rather than seven.
+    """
+    now = datetime.datetime.now()
+    try:
+        moment = datetime.datetime.fromisoformat(scheduled_for)
+    except (TypeError, ValueError):
+        # An unreadable schedule is no reason to lose the reminder.
+        moment = now
+
+    if frequency == "monthly":
+        advance = _add_month
+    else:
+        # Anything unrecognised repeats daily, as it always has — a reminder
+        # with a bad frequency is better late than silently annual.
+        step = _RECURRENCE_DELTAS.get(frequency, datetime.timedelta(days=1))
+        advance = lambda m: m + step  # noqa: E731
+
+    moment = advance(moment)
+    while moment <= now:
+        moment = advance(moment)
+    return moment
 
 
 class UltronCore:
@@ -406,6 +451,18 @@ class UltronCore:
                     if not scheduled_for or scheduled_for > now_iso:
                         continue
 
+                    # Settle the schedule before announcing it. If the database
+                    # write failed afterwards the reminder would still read as
+                    # due, and it would be spoken again on every poll.
+                    if frequency:
+                        next_iso = next_occurrence(scheduled_for, frequency).isoformat()
+                        if until_date and next_iso > until_date:
+                            self.brain.db.delete_task(task_id)
+                        else:
+                            self.brain.db.update_task_time(task_id, next_iso)
+                    else:
+                        self.brain.db.delete_task(task_id)
+
                     send_toast("Ultron Reminder", desc)
                     # Its own source, so a UI can tell a due reminder apart
                     # from a passing loading phrase. Unlike "cron" this is
@@ -413,17 +470,6 @@ class UltronCore:
                     self.output_manager.enqueue(
                         f"Sir, here is your reminder: {desc}", source="reminder"
                     )
-
-                    if not frequency:
-                        self.brain.db.delete_task(task_id)
-                        continue
-
-                    delta = _RECURRENCE_DELTAS.get(frequency, datetime.timedelta(days=1))
-                    next_iso = (datetime.datetime.now() + delta).isoformat()
-                    if until_date and next_iso > until_date:
-                        self.brain.db.delete_task(task_id)
-                    else:
-                        self.brain.db.update_task_time(task_id, next_iso)
             except Exception as e:
                 self._status(f"[Reminder Error] {e}")
 

@@ -14,7 +14,7 @@ from ultron.automation import (
     get_system_health, write_in_notepad, send_whatsapp_message,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
-    copy_file, move_file
+    copy_file, move_file, release_stuck_keys
 )
 from ultron.plugins.explorer_plugin import get_selected_file_in_explorer
 from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
@@ -49,6 +49,29 @@ _TIME_PATTERN = re.compile(
     r'(?P<ap>a\.?m\.?|p\.?m\.?)?',
     re.IGNORECASE
 )
+
+_FREQUENCIES = ("hourly", "daily", "weekly", "monthly")
+
+# Models rarely emit the bare adverb, so the phrasings they do reach for are
+# mapped rather than rejected.
+_FREQUENCY_ALIASES = {
+    "every day": "daily", "day": "daily", "everyday": "daily", "days": "daily",
+    "every hour": "hourly", "hour": "hourly", "hours": "hourly",
+    "every week": "weekly", "week": "weekly", "weeks": "weekly",
+    "every month": "monthly", "month": "monthly", "months": "monthly",
+}
+
+
+def normalise_frequency(frequency: str):
+    """Maps a spoken recurrence onto a supported one, or None if unsupported.
+
+    Rejecting outright matters: an unrecognised frequency reaching the
+    scheduler would silently repeat on the wrong cadence rather than telling
+    anyone the request was not understood.
+    """
+    freq = (frequency or "daily").strip().lower().rstrip("(),.")
+    freq = _FREQUENCY_ALIASES.get(freq, freq)
+    return freq if freq in _FREQUENCIES else None
 
 
 def parse_time_string(time_str: str, now: datetime.datetime = None) -> datetime.datetime:
@@ -141,6 +164,9 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "save_memory", "search_memories", "search_past_conversations",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+        # Always reachable: if a modifier is stuck the user cannot type
+        # comfortably, so asking by voice must work whatever else is loaded.
+        "release_stuck_keys",
     ],
     # Desktop app control + media + volume
     "system": [
@@ -434,9 +460,13 @@ class Brain:
         def set_recurring_reminder(description: str, start_delay_seconds: int, frequency: str, until_date_iso: str = None) -> str:
             """Sets a recurring reminder. frequency must be 'hourly', 'daily', 'weekly', or 'monthly'."""
             import datetime
+            freq = normalise_frequency(frequency)
+            if freq is None:
+                return (f"Error: frequency '{frequency}' is not supported. "
+                        "Use hourly, daily, weekly, or monthly.")
             scheduled_for = (datetime.datetime.now() + datetime.timedelta(seconds=start_delay_seconds)).isoformat()
-            self.db.add_task(description, scheduled_for, frequency, until_date_iso)
-            return f"Recurring reminder '{frequency}' successfully set to trigger first in {start_delay_seconds} seconds."
+            self.db.add_task(description, scheduled_for, freq, until_date_iso)
+            return f"Recurring reminder '{freq}' successfully set to trigger first in {start_delay_seconds} seconds."
 
         def set_reminder_at(description: str, time_str: str) -> str:
             """Sets a one-time reminder at a clock time, e.g. '10:20 am', '17:30', 'tomorrow 9am'. Use this whenever the user gives a time of day rather than a delay."""
@@ -449,15 +479,8 @@ class Brain:
 
         def set_recurring_reminder_at(description: str, time_str: str, frequency: str, until_date_iso: str = None) -> str:
             """Sets a repeating reminder at a clock time, e.g. '10:20 am' daily. frequency must be 'hourly', 'daily', 'weekly', or 'monthly'. Use this for requests like 'remind me every day at 10:20 am'."""
-            freq = (frequency or "daily").strip().lower().rstrip("(),.")
-            aliases = {
-                "every day": "daily", "day": "daily", "everyday": "daily",
-                "every hour": "hourly", "hour": "hourly",
-                "every week": "weekly", "week": "weekly",
-                "every month": "monthly", "month": "monthly",
-            }
-            freq = aliases.get(freq, freq)
-            if freq not in ("hourly", "daily", "weekly", "monthly"):
+            freq = normalise_frequency(frequency)
+            if freq is None:
                 return f"Error: frequency '{frequency}' is not supported. Use hourly, daily, weekly, or monthly."
             try:
                 scheduled = parse_time_string(time_str)
@@ -630,6 +653,7 @@ class Brain:
             "delete_file": delete_file,
             "copy_file": copy_file,
             "move_file": move_file,
+            "release_stuck_keys": release_stuck_keys,
             "list_directory": list_directory,
             "open_folder": open_folder,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
@@ -1052,7 +1076,12 @@ Your response: Let me find some great Malayalam songs for you, sir.
                     return "play"
                 break  # Only check the most recent user message
 
-        return "play"  # safe default
+        # No media intent in what the user actually said. Guessing "play" here
+        # meant that "open spotify" started blasting music, because a weak
+        # local model calls this tool with no action and the fallback filled
+        # one in. Starting playback is not a safe default — say nothing was
+        # inferred and let the caller refuse.
+        return ""
 
     def on_tool_event(self, callback):
         """Registers callback(phase, name, detail) for every tool invocation.
@@ -1087,6 +1116,13 @@ Your response: Let me find some great Malayalam songs for you, sir.
             args = dict(func_args) if func_args else {}
             if not args.get("action"):
                 inferred = self._infer_media_action()
+                if not inferred:
+                    print("[SmartInfer] system_media_control called with no 'action' "
+                          "and the user asked for no media action — refusing.")
+                    return ("Error: system_media_control needs an explicit 'action' "
+                            "('play', 'pause', 'next' or 'prev'). The user did not ask "
+                            "for playback, so nothing was changed. If they only asked to "
+                            "open an app, use open_application instead.")
                 print(f"[SmartInfer] system_media_control missing 'action' — inferred: '{inferred}'")
                 args["action"] = inferred
             func_args = args
@@ -1095,6 +1131,10 @@ Your response: Let me find some great Malayalam songs for you, sir.
             clean_args = coerce_tool_args(func, func_args)
         except ValueError as e:
             return f"Error: {e}"
+
+        # Logged so unexpected behaviour can be traced to the tool that caused
+        # it. With the GUI there is no console, so this lands in ultron.log.
+        print(f"[Tool] {func_name}({clean_args})")
 
         self._emit_tool_event("start", func_name)
         try:

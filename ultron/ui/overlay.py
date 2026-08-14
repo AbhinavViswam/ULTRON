@@ -1,8 +1,9 @@
 """The Ultron overlay: a floating orb with message cards.
 
 The orb is the whole interface. It shows state, it takes clicks for typed
-input, and messages appear beside it and fade. There is no chat window — the
-transcript lives in the database, not on screen.
+input, and messages appear beside it and fade. Clicking it opens the prompt
+box, which carries this session's conversation above the entry line so a reply
+can still be re-read after its card has gone.
 """
 
 import threading
@@ -73,9 +74,9 @@ class OrbOverlay(QWidget):
 
         if config.missing_requirements():
             self._show_settings()
-            self.cards.add(
+            self._post(
                 "Setup needed before I can start. " + config.missing_requirements()[0],
-                role="system",
+                "system",
             )
         else:
             self._boot_core()
@@ -207,14 +208,22 @@ class OrbOverlay(QWidget):
         if self.input_card.isVisible():
             self.input_card.hide()
             return
-        position = self.pos()
+        screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geometry = self.frameGeometry()
+        # Anchored by its bottom-right corner, just left of the orb, so the
+        # box grows upward as the transcript fills.
         self.input_card.open_at(
-            QPoint(position.x() - self.input_card.width() - 10, position.y() + 10)
+            QPoint(geometry.left() - 10, geometry.bottom()),
+            screen.availableGeometry() if screen else None,
         )
 
     def _on_submitted(self, text: str):
         if not self.core:
-            self.cards.add("I am not online yet, sir.", role="system")
+            # Echo the question too, or the refusal reads as unprompted.
+            self._post(text, "user")
+            self._post("I am not online yet, sir.", "system")
             return
         self.input_card.hide()
         # No card here: submit() announces the input itself, and only it knows
@@ -280,7 +289,7 @@ class OrbOverlay(QWidget):
     def summon(self):
         """Brings the orb back — used when a second launch is attempted."""
         self._show_orb()
-        self.cards.add("Already running, sir.", role="system")
+        self._post("Already running, sir.", "system", keep=False)
 
     def _toggle_mic(self):
         if not self.core:
@@ -288,8 +297,9 @@ class OrbOverlay(QWidget):
             return
         active = self.core.set_microphone(self.mic_action.isChecked())
         self._sync_mic_ui(active)
-        self.cards.add(
-            "Microphone on, sir." if active else "Microphone off.", role="system"
+        self._post(
+            "Microphone on, sir." if active else "Microphone off.",
+            "system", keep=False,
         )
 
     def _sync_mic_ui(self, active: bool):
@@ -354,7 +364,7 @@ class OrbOverlay(QWidget):
         self._sync_mic_ui(self.core.microphone_active)
 
     def _on_core_failed(self, message: str):
-        self.cards.add(f"I could not start: {message}", role="system")
+        self._post(f"I could not start: {message}", "system")
         self._show_settings()
 
     def _on_state_changed(self, state: str, detail):
@@ -363,8 +373,18 @@ class OrbOverlay(QWidget):
         # The caption appearing changes the window's visible shape.
         self._apply_mask()
 
+    def _post(self, text: str, role: str, keep: bool = True):
+        """Shows a message as a floating card and records it in the session.
+
+        `keep` is off for passing chatter — loading phrases and the like —
+        which is worth seeing once but only clutters a transcript.
+        """
+        self.cards.add(text, role=role)
+        if keep:
+            self.input_card.append(text, role)
+
     def _on_assistant_message(self, text: str, source: str):
-        self.cards.add(text, role=SOURCE_ROLES.get(source, "system"))
+        self._post(text, SOURCE_ROLES.get(source, "system"), keep=source != "status")
 
     def _on_user_message(self, text: str, origin: str, queued: bool):
         """Cards every accepted input, typed or spoken, queued or immediate.
@@ -376,7 +396,7 @@ class OrbOverlay(QWidget):
         role = "user_voice" if origin == "voice" else "user"
         if queued:
             role += "_queued"
-        self.cards.add(text, role=role)
+        self._post(text, role)
 
     def _on_settings_saved(self):
         if not self.core:
@@ -385,7 +405,8 @@ class OrbOverlay(QWidget):
             return
         self.core.set_microphone(bool(config.get("microphone_active", True)))
         self._sync_mic_ui(self.core.microphone_active)
-        self.cards.add(f"Settings updated. Using {config.model_for()}.", role="system")
+        self._post(f"Settings updated. Using {config.model_for()}.",
+                   "system", keep=False)
 
     # ------------------------------------------------------------------
     # Lifecycle

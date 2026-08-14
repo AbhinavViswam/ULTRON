@@ -11,7 +11,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+    QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 )
 
 from ultron.ui import theme
@@ -54,6 +55,35 @@ CARD_LOOKS = {
 
 # Kinds that must not be missed, so they linger.
 LONG_LIVED_ROLES = ("reminder", "scheduled")
+
+# --- Session transcript, shown inside the input card -------------------------
+
+# Tall enough to hold a few exchanges; past this the transcript scrolls rather
+# than growing into a full-height window.
+TRANSCRIPT_MAX_HEIGHT = 300
+# A long session must not grow the widget tree without bound.
+TRANSCRIPT_MAX_ROWS = 120
+BUBBLE_RADIUS = 10
+# Within this many pixels of the bottom still counts as "reading the newest",
+# so a stray wheel notch does not stop the view following the conversation.
+SCROLL_FOLLOW_SLACK = 6
+
+# Per role: fill, text colour, caption, caption colour, right-aligned.
+# Alignment carries who spoke, so ordinary turns need no caption at all.
+TRANSCRIPT_LOOKS = {
+    "user": (theme.USER_BUBBLE, theme.TEXT, "", theme.TEXT_DIM, True),
+    "user_voice": (theme.USER_BUBBLE, theme.TEXT, "SPOKEN", theme.ACCENT, True),
+    "user_queued": (theme.PANEL_LIGHT, theme.TEXT, "QUEUED", theme.TEXT_DIM, True),
+    "user_voice_queued": (theme.PANEL_LIGHT, theme.TEXT, "SPOKEN · QUEUED",
+                          theme.TEXT_DIM, True),
+    "ultron": (theme.PANEL_LIGHT, theme.TEXT, "", theme.ACCENT, False),
+    "reminder": (theme.PANEL_LIGHT, theme.TEXT, "REMINDER", theme.WARNING, False),
+    "scheduled": (theme.PANEL_LIGHT, theme.TEXT, "SCHEDULED", theme.ACCENT, False),
+    "system": (theme.PANEL, theme.TEXT_DIM, "", theme.TEXT_DIM, False),
+}
+
+# Roles whose caption colour is worth drawing around the whole bubble.
+BORDERED_ROLES = ("reminder", "scheduled")
 
 
 class _FloatingWindow(QWidget):
@@ -201,8 +231,151 @@ class MessageCard(_FloatingWindow):
         self.dismissed.emit(self)
 
 
+class _TranscriptRow(QWidget):
+    """One turn in the session transcript: a captioned bubble, left or right."""
+
+    def __init__(self, text: str, role: str, max_bubble_width: int):
+        super().__init__()
+        fill, text_color, caption, caption_color, on_right = TRANSCRIPT_LOOKS.get(
+            role, TRANSCRIPT_LOOKS["system"]
+        )
+
+        bubble = QFrame()
+        bubble.setStyleSheet(
+            f"QFrame {{ background: {fill}; border: 1px solid {caption_color if role in BORDERED_ROLES else theme.BORDER};"
+            f"border-radius: {BUBBLE_RADIUS}px; }}"
+        )
+        bubble.setMaximumWidth(max_bubble_width)
+
+        inner = QVBoxLayout(bubble)
+        inner.setContentsMargins(10, 7, 10, 8)
+        inner.setSpacing(2)
+
+        if caption:
+            tag = QLabel(caption)
+            tag.setStyleSheet(
+                f"color: {caption_color}; background: transparent; border: none;"
+                "font-size: 8.5px; font-weight: 600; letter-spacing: 1.2px;"
+            )
+            inner.addWidget(tag)
+
+        body = QLabel(text)
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.PlainText)
+        # Selectable so a reply can be copied out of the transcript.
+        body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        body.setStyleSheet(
+            f"color: {text_color}; background: transparent; border: none;"
+            "font-size: 12px;"
+        )
+        inner.addWidget(body)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        if on_right:
+            row.addStretch(1)
+            row.addWidget(bubble)
+        else:
+            row.addWidget(bubble)
+            row.addStretch(1)
+
+
+class TranscriptView(QScrollArea):
+    """The running record of this session, scrolled to the newest turn.
+
+    Cards are deliberately transient, so once one fades there is no way to
+    re-read what was said. This keeps the same messages available for as long
+    as the process lives, without putting a permanent window on the desktop.
+    """
+
+    def __init__(self, width: int):
+        super().__init__()
+        self._bubble_width = int(width * 0.86)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.viewport().setAutoFillBackground(False)
+
+        self._holder = QWidget()
+        self._holder.setAutoFillBackground(False)
+        self._rows = QVBoxLayout(self._holder)
+        self._rows.setContentsMargins(0, 0, 4, 0)
+        self._rows.setSpacing(6)
+        self._rows.addStretch(1)
+        self.setWidget(self._holder)
+
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setFixedHeight(0)
+        self.hide()
+
+        # Wrapped labels report their real height several layout passes later,
+        # so the scroll range keeps growing after a message is added. Following
+        # the range rather than setting a position once is what actually keeps
+        # the newest turn in view — and it stops following the moment the user
+        # scrolls up to re-read something.
+        self._follow = True
+        bar = self.verticalScrollBar()
+        bar.rangeChanged.connect(self._on_range_changed)
+        bar.valueChanged.connect(self._on_value_changed)
+
+    def _on_range_changed(self, _minimum, maximum):
+        if self._follow:
+            self.verticalScrollBar().setValue(maximum)
+
+    def _on_value_changed(self, value):
+        bar = self.verticalScrollBar()
+        self._follow = value >= bar.maximum() - SCROLL_FOLLOW_SLACK
+
+    @property
+    def is_empty(self) -> bool:
+        # The trailing stretch is always present, so it is not a row.
+        return self._rows.count() <= 1
+
+    def append(self, text: str, role: str):
+        row = _TranscriptRow(text, role, self._bubble_width)
+        # Insert before the trailing stretch that keeps short sessions top-aligned.
+        self._rows.insertWidget(self._rows.count() - 1, row)
+
+        while self._rows.count() - 1 > TRANSCRIPT_MAX_ROWS:
+            stale = self._rows.takeAt(0)
+            if stale.widget():
+                stale.widget().deleteLater()
+
+        if not self.isVisible():
+            self.show()
+        self._resize_to_content()
+
+    def clear(self):
+        while self._rows.count() > 1:
+            item = self._rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.setFixedHeight(0)
+        self.hide()
+
+    def _resize_to_content(self):
+        """Grows with the conversation up to a ceiling, then scrolls instead."""
+        wanted = self._holder.sizeHint().height()
+        self.setFixedHeight(min(wanted, TRANSCRIPT_MAX_HEIGHT))
+        # Wrapped labels only report their real height after the next layout
+        # pass, so settle the height and the scroll position once that lands.
+        QTimer.singleShot(0, self.settle)
+
+    def settle(self):
+        """Re-measures after layout and jumps back to the newest turn."""
+        wanted = self._holder.sizeHint().height()
+        self.setFixedHeight(min(wanted, TRANSCRIPT_MAX_HEIGHT))
+        self._follow = True
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+
 class InputCard(_FloatingWindow):
-    """A one-line prompt box, opened by clicking the orb."""
+    """The prompt box, opened by clicking the orb.
+
+    Above the entry sits this session's transcript, so the conversation can be
+    re-read after the floating cards have faded.
+    """
 
     submitted = Signal(str)
 
@@ -211,23 +384,78 @@ class InputCard(_FloatingWindow):
         self._fill = QColor(theme.PANEL)
         self._fill.setAlpha(250)
         self._stroke = QColor(theme.ACCENT_DIM)
+        self._anchor = None
+        self._screen = None
+        # Theme rather than inline styling, so the scrollbar matches the rest.
+        self.setStyleSheet(theme.STYLESHEET)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 10)
+        layout.setSpacing(7)
+
+        self._header = self._build_header()
+        self._header.hide()
+        layout.addWidget(self._header)
+
+        self.transcript = TranscriptView(CARD_WIDTH - 24)
+        layout.addWidget(self.transcript)
 
         self.edit = QLineEdit()
         self.edit.setPlaceholderText("Ask Ultron…")
-        self.edit.setStyleSheet(
-            f"QLineEdit {{ background: {theme.PANEL_LIGHT}; color: {theme.TEXT};"
-            f"border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 7px 10px;"
-            f"selection-background-color: {theme.ACCENT_DIM}; font-size: 12.5px; }}"
-            f"QLineEdit:focus {{ border: 1px solid {theme.ACCENT_DIM}; }}"
-        )
+        self.edit.setStyleSheet("font-size: 12.5px;")
         self.edit.returnPressed.connect(self._submit)
         layout.addWidget(self.edit)
 
         self.setFixedWidth(CARD_WIDTH)
         self.adjustSize()
+
+    def _build_header(self) -> QWidget:
+        header = QWidget()
+        row = QHBoxLayout(header)
+        row.setContentsMargins(2, 0, 2, 0)
+
+        title = QLabel("THIS SESSION")
+        title.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: 8.5px;"
+            "font-weight: 600; letter-spacing: 1.4px;"
+        )
+        row.addWidget(title)
+        row.addStretch(1)
+
+        clear = QPushButton("clear")
+        clear.setObjectName("iconButton")
+        clear.setStyleSheet("font-size: 10px;")
+        clear.setCursor(Qt.PointingHandCursor)
+        clear.setFocusPolicy(Qt.NoFocus)
+        clear.clicked.connect(self._clear_transcript)
+        row.addWidget(clear)
+        return header
+
+    def append(self, text: str, role: str):
+        """Adds a turn to the transcript, whether or not the card is open."""
+        self.transcript.append(text, role)
+        self._header.show()
+        self._refit()
+
+    def _clear_transcript(self):
+        """Clears the on-screen record only — the database keeps the history."""
+        self.transcript.clear()
+        self._header.hide()
+        self._refit()
+        self.edit.setFocus()
+
+    def _refit(self):
+        self.adjustSize()
+        self._reposition()
+        # The transcript settles its height one event loop later, so follow it.
+        QTimer.singleShot(0, self._after_settle)
+
+    def _after_settle(self):
+        self.adjustSize()
+        self._reposition()
+        # Resizing the card changes the scrollable extent, so pin to the newest
+        # turn last of all — otherwise a long reply lands mid-scroll.
+        self.transcript.settle()
 
     def _submit(self):
         text = self.edit.text().strip()
@@ -235,12 +463,33 @@ class InputCard(_FloatingWindow):
             self.edit.clear()
             self.submitted.emit(text)
 
-    def open_at(self, position: QPoint):
-        self.move(position)
+    def open_at(self, bottom_right: QPoint, screen=None):
+        """Opens with its bottom-right corner pinned near the orb.
+
+        Anchoring the bottom means the box grows upward as the transcript
+        fills, keeping the entry line under the pointer instead of walking it
+        down the screen.
+        """
+        self._anchor = bottom_right
+        self._screen = screen
+        self._reposition()
         self.show()
         self.raise_()
         self.activateWindow()
         self.edit.setFocus()
+        QTimer.singleShot(0, self.transcript.settle)
+
+    def _reposition(self):
+        if self._anchor is None:
+            return
+        x = self._anchor.x() - self.width()
+        y = self._anchor.y() - self.height()
+        if self._screen is not None:
+            x = max(self._screen.left() + CARD_GAP,
+                    min(x, self._screen.right() - self.width() - CARD_GAP))
+            y = max(self._screen.top() + CARD_GAP,
+                    min(y, self._screen.bottom() - self.height() - CARD_GAP))
+        self.move(x, y)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
