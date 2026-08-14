@@ -28,5 +28,14 @@
     "y": 162
   },
   "local_api_url": "http://localhost:11434/v1",
-  "filter_local_tools": false
+  "filter_local_tools": false,
+  "idle_chat": {
+    "enabled": true,
+    "after_minutes": 25,
+    "quiet_start_hour": 22,
+    "quiet_end_hour": 8,
+    "silent_when_mic_off": false,
+    "silent_in_fullscreen": false,
+    "give_up_after": 0
+  }
 }

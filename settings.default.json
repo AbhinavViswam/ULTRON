@@ -10,6 +10,15 @@
   "llm_timeout_seconds": null,
   "truth_mode": false,
   "filter_local_tools": false,
+  "idle_chat": {
+    "enabled": true,
+    "after_minutes": 25,
+    "quiet_start_hour": 22,
+    "quiet_end_hour": 8,
+    "silent_when_mic_off": false,
+    "silent_in_fullscreen": false,
+    "give_up_after": 0
+  },
   "cron_jobs": {
     "unread_emails_check": {
       "enabled": false,

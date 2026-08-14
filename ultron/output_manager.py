@@ -10,6 +10,7 @@ class OutputManager:
         - "user"   : Highest. Triggers interrupt of current speech.
         - "system" : Medium. Loading phrases, welcome messages.
         - "cron"   : Lowest. Queued notifications. Cleared on user interrupt.
+        - "idle"   : Lowest. Unprompted small talk. Cleared on user interrupt.
     """
 
     def __init__(self, speaker, echo_to_console: bool = True):
@@ -60,7 +61,7 @@ class OutputManager:
 
         Args:
             message:   The text to be spoken.
-            source:    One of "user", "system", or "cron".
+            source:    One of "user", "system", "cron", or "idle".
             print_msg: Whether to print the message to the console.
         """
         if message and message.strip():
@@ -91,7 +92,9 @@ class OutputManager:
                 item = self._queue.get_nowait()
             except queue.Empty:
                 break
-            if item["source"] != "cron":
+            # An unprompted remark that has not been spoken yet is never
+            # worth making the user wait for.
+            if item["source"] not in ("cron", "idle"):
                 kept.append(item)
 
         # Re-enqueue any non-cron items we want to keep

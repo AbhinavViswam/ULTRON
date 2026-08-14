@@ -32,6 +32,7 @@ SOURCE_ROLES = {
     "user": "ultron",
     "reminder": "reminder",
     "cron": "scheduled",
+    "idle": "ultron",
     "system": "system",
     "status": "system",
 }

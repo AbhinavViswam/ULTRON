@@ -127,6 +127,11 @@ def tool_label(name: str) -> str:
 # How often the reminder worker scans for due tasks.
 REMINDER_POLL_SECONDS = 15
 
+# How often to check whether the silence has gone on long enough. Coarse on
+# purpose: the threshold is measured in tens of minutes, so polling faster
+# would only burn cycles.
+IDLE_POLL_SECONDS = 60
+
 # How long a destructive action waits for a yes or no before giving up. Long
 # enough to read the card and decide, short enough that an unnoticed question
 # does not hold the worker thread for the rest of the session.
@@ -203,6 +208,11 @@ class UltronCore:
         self._running = False
         self._threads = []
         self._is_processing = False
+        # When the user last said something, or Ultron last spoke. Both count:
+        # nudging seconds after a reminder has just been read out would feel
+        # like being talked at rather than talked to.
+        self._last_exchange = time.monotonic()
+        self._idle_nudges_unanswered = 0
 
         self._assistant_listeners = []
         self._user_listeners = []
@@ -329,6 +339,8 @@ class UltronCore:
     def _on_speaking_changed(self, speaking: bool):
         self._speaking = speaking
         if not speaking:
+            self._last_exchange = time.monotonic()
+        if not speaking:
             self._emit_level(0.0)
         self._recompute_state()
 
@@ -370,6 +382,8 @@ class UltronCore:
         if not text or not text.strip():
             return
         text = text.strip()
+        self._last_exchange = time.monotonic()
+        self._idle_nudges_unanswered = 0
         was_queued = self._is_processing
         if not was_queued:
             self.output_manager.interrupt()
@@ -535,6 +549,59 @@ class UltronCore:
                     return
                 time.sleep(0.5)
 
+    def _idle_loop(self):
+        """Speaks up unprompted after a long enough silence.
+
+        The whole value of this is that it is rare. Anything that makes it
+        frequent — nudging while busy, nudging straight after a reminder,
+        nudging again before the user has had a chance to answer — turns a
+        nice touch into something you want to switch off.
+        """
+        from ultron import idle_chat
+
+        while self._running:
+            for _ in range(IDLE_POLL_SECONDS * 2):
+                if not self._running:
+                    return
+                time.sleep(0.5)
+
+            try:
+                minutes = int(config.get("idle_chat.after_minutes",
+                                         idle_chat.DEFAULT_IDLE_MINUTES))
+                idle_for = time.monotonic() - self._last_exchange
+                if idle_for < minutes * 60:
+                    continue
+
+                # Mid-turn is not silence. Waiting for the next poll costs
+                # nothing and avoids talking over Ultron's own answer.
+                if self._is_processing or self._speaking or self._active_tool:
+                    continue
+
+                limit = int(config.get("idle_chat.give_up_after", 0) or 0)
+                if limit and self._idle_nudges_unanswered >= limit:
+                    continue
+
+                blocked = idle_chat.blocked_reason(self.brain, self.microphone_active)
+                if blocked:
+                    self._status(f"[Idle] staying quiet — {blocked}")
+                    # Reset the clock, or the moment the reason clears it
+                    # would fire immediately with hours of "silence" banked.
+                    self._last_exchange = time.monotonic()
+                    continue
+
+                line = idle_chat.compose(self.brain, int(idle_for // 60))
+                if not line:
+                    continue
+
+                self._idle_nudges_unanswered += 1
+                # Its own source so a UI can style it, and so an interrupt
+                # discards it — an unprompted remark must never delay a real
+                # answer the user is waiting for.
+                self.output_manager.enqueue(line, source="idle")
+                self._last_exchange = time.monotonic()
+            except Exception as e:
+                self._status(f"[Idle Error] {e}")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -552,6 +619,10 @@ class UltronCore:
         reminders = threading.Thread(target=self._reminder_loop, daemon=True)
         reminders.start()
         self._threads.append(reminders)
+
+        idle = threading.Thread(target=self._idle_loop, daemon=True)
+        idle.start()
+        self._threads.append(idle)
 
         if config.get("microphone_active", True):
             self.start_microphone()
