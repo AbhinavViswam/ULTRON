@@ -42,8 +42,9 @@ def redirect_output_if_headless():
     try:
         if os.path.getsize(LOG_PATH) > MAX_LOG_BYTES:
             os.replace(LOG_PATH, LOG_PATH + ".old")
-    except OSError:
-        pass
+    except OSError as e:
+        # Nowhere to log this yet — the redirect it guards has not happened.
+        print(f"[Log] could not rotate {LOG_PATH}: {e}", file=sys.stderr)
 
     handle = open(LOG_PATH, "a", encoding="utf-8", errors="replace", buffering=1)
     sys.stdout = handle
@@ -84,8 +85,8 @@ def _special_folder(name: str, fallback: str) -> str:
         path = win32com.client.Dispatch("WScript.Shell").SpecialFolders(name)
         if path and os.path.isdir(path):
             return path
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Shortcut] could not resolve the '{name}' folder: {e}")
     return fallback
 
 
@@ -115,8 +116,8 @@ def ensure_icon() -> str:
         pixmap = theme.make_app_icon(256).pixmap(256, 256)
         if pixmap.save(ICON_PATH, "ICO"):
             return ICON_PATH
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Shortcut] could not generate the icon: {e}")
     return ""
 
 

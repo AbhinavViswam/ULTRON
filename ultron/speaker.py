@@ -49,8 +49,8 @@ class VoiceSpeaker:
         for callback in list(self._level_listeners):
             try:
                 callback(level)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Voice] level listener failed: {e}")
 
     def _clean_text_for_speech(self, text: str) -> str:
         """Strips markdown formatting, URLs, code snippets, and emojis for clean natural speech."""
@@ -147,13 +147,13 @@ class VoiceSpeaker:
             else:
                 stream.stop()
         except Exception as e:
-            pass
+            print(f"[Voice] playback failed: {e}")
         finally:
             if stream:
                 try:
                     stream.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Voice] could not close the audio stream: {e}")
 
     def speak(self, text: str, my_id: int = None):
         """Synchronous speech execution."""

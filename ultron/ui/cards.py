@@ -231,6 +231,99 @@ class MessageCard(_FloatingWindow):
         self.dismissed.emit(self)
 
 
+class ConfirmCard(_FloatingWindow):
+    """Asks the user to approve a destructive action, and will not assume yes.
+
+    Deliberately modal-ish in feel — it takes focus and stays until answered
+    or until the core's timeout expires — because everything it guards is
+    something the user cannot easily take back.
+    """
+
+    answered = Signal(bool)
+
+    def __init__(self, question: str):
+        super().__init__(accept_focus=True)
+        self._fill = QColor(theme.PANEL)
+        self._fill.setAlpha(252)
+        self._stroke = QColor(theme.WARNING)
+        self.setStyleSheet(theme.STYLESHEET)
+        self._done = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 12, 15, 13)
+        layout.setSpacing(9)
+
+        tag = QLabel("CONFIRM")
+        tag.setStyleSheet(
+            f"color: {theme.WARNING}; font-size: 9px;"
+            "font-weight: 600; letter-spacing: 1.6px;"
+        )
+        layout.addWidget(tag)
+
+        body = QLabel(f"Ultron wants to {question}.")
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.PlainText)
+        body.setFixedWidth(CARD_WIDTH - 30)
+        body.setStyleSheet(f"color: {theme.TEXT}; font-size: 12.5px;")
+        layout.addWidget(body)
+        self._body = body
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+
+        no = QPushButton("No")
+        no.setCursor(Qt.PointingHandCursor)
+        no.clicked.connect(lambda: self._answer(False))
+        buttons.addWidget(no)
+
+        yes = QPushButton("Yes, do it")
+        yes.setObjectName("primary")
+        yes.setCursor(Qt.PointingHandCursor)
+        yes.clicked.connect(lambda: self._answer(True))
+        buttons.addWidget(yes)
+        layout.addLayout(buttons)
+
+        # No is focused, so a stray Enter or Space refuses rather than approves.
+        no.setDefault(True)
+        no.setFocus()
+
+        self.setFixedWidth(CARD_WIDTH)
+        self.adjustSize()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._body.setFixedHeight(self._body.heightForWidth(self._body.width()))
+        self.adjustSize()
+
+    def _answer(self, approved: bool):
+        if self._done:
+            return
+        self._done = True
+        self.answered.emit(approved)
+        self.hide()
+        self.deleteLater()
+
+    def expire(self):
+        """Called when the core stopped waiting; the answer is already 'no'."""
+        if self._done:
+            return
+        self._done = True
+        self.hide()
+        self.deleteLater()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._answer(False)
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        # Dismissing the question is not consent.
+        self._answer(False)
+        super().closeEvent(event)
+
+
 class _TranscriptRow(QWidget):
     """One turn in the session transcript: a captioned bubble, left or right."""
 

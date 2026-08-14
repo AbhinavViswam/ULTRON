@@ -92,6 +92,8 @@ TOOL_LABELS = {
     "clean_temp_files": "cleaning temp files",
     "save_memory": "saving to memory",
     "search_memories": "searching memory",
+    "list_memories": "checking what it remembers",
+    "delete_memory": "forgetting something",
     "search_past_conversations": "recalling past conversations",
     "list_reminders": "checking your reminders",
     "delete_reminder": "removing a reminder",
@@ -122,6 +124,11 @@ def tool_label(name: str) -> str:
 
 # How often the reminder worker scans for due tasks.
 REMINDER_POLL_SECONDS = 15
+
+# How long a destructive action waits for a yes or no before giving up. Long
+# enough to read the card and decide, short enough that an unnoticed question
+# does not hold the worker thread for the rest of the session.
+CONFIRM_TIMEOUT_SECONDS = 45
 
 _RECURRENCE_DELTAS = {
     "hourly": datetime.timedelta(hours=1),
@@ -201,6 +208,7 @@ class UltronCore:
         self._status_listeners = []
         self._state_listeners = []
         self._level_listeners = []
+        self._confirm_listeners = []
 
         # Inputs to the derived state, each owned by a different component.
         self._speaking = False
@@ -212,6 +220,9 @@ class UltronCore:
         self.output_manager.on_speaking_changed(self._on_speaking_changed)
         self.speaker.on_level(self._on_speaker_level)
         self.brain.on_tool_event(self._on_tool_event)
+        # Destructive tools ask a human before running. Refused by default if
+        # no front end registers itself as able to ask.
+        self.brain.set_confirm_handler(self._confirm)
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -395,6 +406,49 @@ class UltronCore:
     # Microphone
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Confirmation of destructive actions
+    # ------------------------------------------------------------------
+
+    def on_confirmation_request(self, callback):
+        """Registers the front end that asks the user to approve an action.
+
+        The callback receives (question, decide) on the worker thread and must
+        arrange for `decide(True/False)` to be called once. A GUI shows a card
+        and answers on click; a console prompts and answers on the next line.
+        """
+        self._confirm_listeners.append(callback)
+        return callback
+
+    def _confirm(self, _tool_name: str, _args: dict, question: str) -> bool:
+        """Blocks the worker until the user answers, or the wait runs out.
+
+        Waiting is the point — the tool must not run until a human agrees —
+        but an unanswered question must not wedge the assistant forever, so
+        silence expires and counts as no.
+        """
+        if not self._confirm_listeners:
+            return False
+
+        decision = {"approved": False}
+        answered = threading.Event()
+
+        def decide(approved: bool):
+            # Only the first answer counts; a second click must not resurrect
+            # a request that already timed out and reported itself refused.
+            if answered.is_set():
+                return
+            decision["approved"] = bool(approved)
+            answered.set()
+
+        self._fire(self._confirm_listeners, question, decide)
+
+        if not answered.wait(CONFIRM_TIMEOUT_SECONDS):
+            answered.set()
+            self._status(f"[Confirm] no answer about '{question}' — treating as no")
+            return False
+        return decision["approved"]
+
     def start_microphone(self) -> bool:
         """Starts continuous background listening. Returns True if active."""
         if self.listener and self.listener.is_listening:
@@ -525,5 +579,7 @@ class UltronCore:
         ):
             try:
                 stop()
-            except Exception:
-                pass
+            except Exception as e:
+                # Shutdown continues regardless — one stubborn subsystem must
+                # not keep the others running — but say which one failed.
+                print(f"[Shutdown] {getattr(stop, '__name__', stop)} failed: {e}")

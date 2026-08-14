@@ -70,8 +70,8 @@ def web_search(query: str, max_results: int = 6) -> str:
                     params = urllib.parse.parse_qs(parsed.query)
                     raw_url = params.get("uddg", [raw_url])[0]
                     raw_url = urllib.parse.unquote(raw_url)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Research] could not unwrap a result URL: {e}")
 
             title = html.unescape(re.sub(r"<[^>]+>", "", raw_title)).strip()
             snippet = html.unescape(re.sub(r"<[^>]+>", "", raw_snippet)).strip()

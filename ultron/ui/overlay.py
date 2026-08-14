@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from ultron.config import config
 from ultron.core import STATE_IDLE, STATE_TOOL
 from ultron.ui import theme
-from ultron.ui.cards import CardStack, InputCard
+from ultron.ui.cards import CardStack, ConfirmCard, InputCard
 from ultron.ui.orb import Orb, OrbLabel
 from ultron.ui.settings_window import SettingsWindow
 
@@ -47,6 +47,7 @@ class OrbOverlay(QWidget):
     user_message = Signal(str, str, bool)
     state_changed = Signal(str, object)
     level_changed = Signal(float)
+    confirmation_requested = Signal(str, object)
     core_ready = Signal()
     core_failed = Signal(str)
 
@@ -56,6 +57,7 @@ class OrbOverlay(QWidget):
         self._press_pos = None
         self._drag_offset = None
         self._dragging = False
+        self._confirm_card = None
 
         self._build_window()
         self._build_tray()
@@ -330,6 +332,7 @@ class OrbOverlay(QWidget):
         self.user_message.connect(self._on_user_message)
         self.state_changed.connect(self._on_state_changed)
         self.level_changed.connect(self.orb.set_level)
+        self.confirmation_requested.connect(self._ask_confirmation)
         self.core_ready.connect(self._on_core_ready)
         self.core_failed.connect(self._on_core_failed)
 
@@ -352,6 +355,10 @@ class OrbOverlay(QWidget):
                 )
                 core.on_level(lambda level: self.level_changed.emit(level))
                 core.on_status(lambda text: self.assistant_message.emit(text, "status"))
+                core.on_confirmation_request(
+                    lambda question, decide:
+                    self.confirmation_requested.emit(question, decide)
+                )
                 self.core = core
                 core.start()
                 self.core_ready.emit()
@@ -398,6 +405,37 @@ class OrbOverlay(QWidget):
             role += "_queued"
         self._post(text, role)
 
+    def _ask_confirmation(self, question: str, decide):
+        """Puts the question on screen and reports the answer back to the core.
+
+        The worker thread is blocked waiting on `decide`, so every path out of
+        here must call it exactly once — including quitting mid-question.
+        """
+        self._show_orb()
+        card = ConfirmCard(question)
+        self._confirm_card = card
+
+        def answered(approved: bool):
+            self._confirm_card = None
+            self._post(
+                f"{'Approved' if approved else 'Refused'}: {question}.", "system"
+            )
+            decide(approved)
+
+        card.answered.connect(answered)
+
+        geometry = self.frameGeometry()
+        screen = QApplication.screenAt(geometry.center()) or QApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else None
+        x, y = geometry.left() - card.width() - 10, geometry.top() - card.height()
+        if area:
+            x = max(area.left() + 8, min(x, area.right() - card.width() - 8))
+            y = max(area.top() + 8, min(y, area.bottom() - card.height() - 8))
+        card.move(x, y)
+        card.show()
+        card.raise_()
+        card.activateWindow()
+
     def _on_settings_saved(self):
         if not self.core:
             if not config.missing_requirements():
@@ -419,6 +457,10 @@ class OrbOverlay(QWidget):
 
     def quit_app(self):
         self.orb.set_state(STATE_IDLE, None)
+        # Quitting with a question open answers it 'no', which both releases
+        # the blocked worker and is the right answer to an abandoned prompt.
+        if self._confirm_card is not None:
+            self._confirm_card._answer(False)
         self.cards.close_all()
         self.input_card.close()
         self.settings_window.close()

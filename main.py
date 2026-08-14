@@ -48,6 +48,20 @@ def main():
             sys.stdout.flush()
 
     core.on_user_message(show_user_message)
+
+    # A destructive tool blocks its worker until a human answers. The console
+    # already owns stdin, so the question is posted here and the next typed
+    # line is read as the answer instead of being sent to Ultron.
+    pending_confirmation = {"decide": None}
+
+    def ask_confirmation(question, decide):
+        pending_confirmation["decide"] = decide
+        with stdout_lock:
+            sys.stdout.write(f"\n\n[CONFIRM] Ultron wants to {question}.\n")
+            sys.stdout.write("Type 'yes' to allow, anything else to refuse.\n")
+            sys.stdout.flush()
+
+    core.on_confirmation_request(ask_confirmation)
     core.start()
 
     if core.microphone_active:
@@ -72,6 +86,15 @@ def main():
                 with stdout_lock:
                     print("\nUltron: Goodbye! Shutting down.")
                 break
+
+            decide = pending_confirmation["decide"]
+            if decide is not None:
+                pending_confirmation["decide"] = None
+                approved = text.lower() in ("yes", "y", "yeah", "yep", "confirm", "do it")
+                with stdout_lock:
+                    print("Approved." if approved else "Refused — nothing was changed.")
+                decide(approved)
+                continue
 
             core.submit(text, origin="keyboard")
     except KeyboardInterrupt:

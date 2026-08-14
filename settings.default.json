@@ -7,6 +7,7 @@
   "local_model": "gemma4:e2b",
   "local_api_url": "http://localhost:11434/v1",
   "microphone_active": true,
+  "llm_timeout_seconds": null,
   "truth_mode": false,
   "filter_local_tools": false,
   "cron_jobs": {

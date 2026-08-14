@@ -5,7 +5,7 @@
   "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "gemini_model": "gemini-3.5-flash",
   "local_model": "gemma4:e2b",
-  "microphone_active": true,
+  "microphone_active": false,
   "cron_jobs": {
     "unread_emails_check": {
       "enabled": false,
@@ -24,8 +24,8 @@
     "pending_tool_seconds": 10
   },
   "overlay_position": {
-    "x": 552,
-    "y": 207
+    "x": 1363,
+    "y": 162
   },
   "local_api_url": "http://localhost:11434/v1",
   "filter_local_tools": false

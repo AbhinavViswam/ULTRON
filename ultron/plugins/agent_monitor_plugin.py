@@ -170,6 +170,8 @@ class _HookHandler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(data)
         except OSError:
+            # The client hung up before reading the reply. Routine for a local
+            # hook that fires and forgets, and nothing can be done about it.
             pass
 
     def log_message(self, *args):
@@ -239,8 +241,8 @@ class AgentMonitor:
             if self._server:
                 self._server.shutdown()
                 self._server.server_close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Agent Monitor] failed to stop the server: {e}")
         self._server = None
         return "Agent monitor stopped."
 
@@ -544,8 +546,8 @@ def detect_ide():
             for needle, friendly in IDES:
                 if needle in name:
                     return friendly
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Agent Monitor] could not identify the parent IDE: {e}")
     # Fallback only if psutil is unavailable. Note every VSCode fork sets
     # TERM_PROGRAM=vscode, so this cannot distinguish them — it is a last resort.
     if (os.environ.get("TERM_PROGRAM") or "").lower() == "vscode":
@@ -578,8 +580,8 @@ def main():
             "message": payload.get("message") or "",
         }}).encode("utf-8")
         send(body)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Agent Monitor] could not deliver the hook event: {e}")
 
 main()
 sys.exit(0)

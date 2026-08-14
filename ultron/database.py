@@ -154,15 +154,70 @@ class Database:
         """Save a new memory to the Vector DB."""
         if not self.memories_col:
             return
-            
+
         doc_id = str(uuid.uuid4())
         # Combine into a single semantic string
         semantic_text = f"[{category}] {key}: {value}"
         self.memories_col.add(
             documents=[semantic_text],
-            metadatas=[{"category": category, "key": key, "importance": importance}],
+            metadatas=[{
+                "category": category,
+                "key": key,
+                "importance": importance,
+                # Kept alongside the semantic document so a memory can be shown
+                # and deleted without having to parse it back out of the text.
+                "value": value,
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }],
             ids=[doc_id]
         )
+
+    def list_memories(self) -> list:
+        """Every saved memory, oldest first, as dicts.
+
+        Ordered so the numbers a person is shown stay put between listing
+        something and asking for it to be deleted.
+        """
+        if not self.memories_col:
+            return []
+
+        data = self.memories_col.get()
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+        ids = data.get("ids") or []
+
+        memories = []
+        for i, document in enumerate(documents):
+            meta = (metadatas[i] if i < len(metadatas) else None) or {}
+            value = meta.get("value")
+            if value is None:
+                # Saved before 'value' was stored separately: recover it from
+                # the "[category] key: value" document.
+                value = document.split(":", 1)[1].strip() if ":" in document else document
+            memories.append({
+                "id": ids[i],
+                "category": meta.get("category", ""),
+                "key": meta.get("key", ""),
+                "value": value,
+                "importance": meta.get("importance", 0),
+                "saved_at": meta.get("saved_at", ""),
+                "document": document,
+            })
+
+        # Entries predating 'saved_at' sort first, which puts the oldest known
+        # memories at the top either way.
+        memories.sort(key=lambda m: (m["saved_at"] or "", m["id"]))
+        return memories
+
+    def delete_memory(self, memory_id: str) -> bool:
+        """Removes one memory by its id. True if it was there to remove."""
+        if not self.memories_col:
+            return False
+        existing = self.memories_col.get(ids=[memory_id])
+        if not (existing and existing.get("ids")):
+            return False
+        self.memories_col.delete(ids=[memory_id])
+        return True
             
     def search_memories(self, query: str = ""):
         """Search memories using Vector Semantic matching."""

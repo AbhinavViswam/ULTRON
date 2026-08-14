@@ -31,8 +31,8 @@ class VoiceListener:
         for callback in list(self._level_listeners):
             try:
                 callback(level, is_speech)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Voice Engine] level listener failed: {e}")
 
     def calibrate(self):
         """Calibrates background ambient noise for 0.8 seconds to set dynamic speech threshold."""
@@ -106,9 +106,13 @@ class VoiceListener:
                 if self.callback_func:
                     self.callback_func(text)
         except sr.UnknownValueError:
+            # Speech that could not be made out. Expected many times a minute
+            # in a noisy room, so logging each one would bury everything else.
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            # Anything else means the transcription never happened — usually
+            # the network. Without this it looks identical to saying nothing.
+            print(f"[Voice Engine] transcription failed: {e}")
 
     def start_listening(self, callback_func=None):
         if callback_func:

@@ -2,6 +2,7 @@ import os
 import subprocess
 import ctypes
 import winreg
+from ctypes import wintypes
 from playwright.sync_api import sync_playwright
 
 # ---------------------------------------------------------------------------
@@ -36,8 +37,8 @@ _SEARCH_SKIP = {
 # Bounds on the folder hunt, so a miss cannot hang the assistant.
 _SEARCH_MAX_DEPTH = 5
 _SEARCH_MAX_DIRS = 40000
-# Wall-clock ceiling. Tool calls run on the thread serving the user and have
-# no timeout around them, so the search stops and answers with what it has.
+# Wall-clock ceiling. The tool watchdog would abandon a runaway search, but
+# answering with what was found beats being cut off with nothing.
 _SEARCH_MAX_SECONDS = 5.0
 # Enough exact hits to judge whether the request was ambiguous.
 _SEARCH_ENOUGH_EXACT = 5
@@ -101,8 +102,8 @@ def known_folder(name: str) -> str:
         path = os.path.expandvars(value)
         if os.path.isdir(path):
             return path
-    except OSError:
-        pass
+    except OSError as e:
+        print(f"[Folders] could not read '{key_name}' from the registry: {e}")
 
     fallback = os.path.join(os.path.expanduser("~"), name.capitalize())
     return fallback if os.path.isdir(fallback) else ""
@@ -354,8 +355,10 @@ def _release_quietly():
         user32 = ctypes.windll.user32
         for vk in _STICKY_KEYS.values():
             user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
-    except Exception:
-        pass
+    except Exception as e:
+        # Worth saying loudly: a failure here is what leaves Ctrl latched down
+        # and the desktop behaving strangely afterwards.
+        print(f"[Keys] failed to release held keys: {e}")
 
 
 def open_application(app_name: str, file_path: str = None) -> str:
@@ -409,12 +412,12 @@ def close_application(app_name: str) -> str:
         
     try:
         # /F forces termination, /IM specifies image name, /T kills child processes
-        subprocess.check_output(f'taskkill /F /IM "{process_name}" /T', shell=True, stderr=subprocess.STDOUT)
+        subprocess.check_output(f'taskkill /F /IM "{process_name}" /T', shell=True, stderr=subprocess.STDOUT, timeout=20)
         return f"Successfully closed {app_name}."
     except Exception:
         # Secondary attempt with wildcards or exact string
         try:
-            subprocess.check_output(f'taskkill /F /FI "WINDOWTITLE eq *{app_name}*" /T', shell=True, stderr=subprocess.STDOUT)
+            subprocess.check_output(f'taskkill /F /FI "WINDOWTITLE eq *{app_name}*" /T', shell=True, stderr=subprocess.STDOUT, timeout=20)
             return f"Successfully closed {app_name}."
         except Exception as e:
             return f"Failed to close {app_name}. Error: {e}"
@@ -455,12 +458,12 @@ def system_media_control(action: str) -> str:
             try:
                 import time
                 # If Spotify is closed, pressing play won't do anything, so we open it first.
-                output = subprocess.check_output('tasklist /FI "IMAGENAME eq spotify.exe"', shell=True).decode()
+                output = subprocess.check_output('tasklist /FI "IMAGENAME eq spotify.exe"', shell=True, timeout=20).decode()
                 if "spotify.exe" not in output.lower():
                     open_application("spotify")
                     time.sleep(5)  # Give Spotify a few seconds to load
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Media] could not check whether Spotify is running: {e}")
                 
             ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
             ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 2, 0)
@@ -528,25 +531,31 @@ def take_screenshot(filename: str = None) -> str:
         img = ImageGrab.grab(all_screens=True)
         img.save(full_path)
         return f"Screenshot saved successfully to: {full_path}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Screen] PIL capture failed, trying PyAutoGUI: {e}")
 
     # Second attempt: PyAutoGUI
     try:
         import pyautogui
         pyautogui.screenshot(full_path)
         return f"Screenshot saved successfully to: {full_path}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Screen] PyAutoGUI capture failed, trying PowerShell: {e}")
 
     # Third attempt: Native Windows PowerShell System.Drawing capture
     try:
         ps_cmd = f'powershell -command "Add-Type -AssemblyName System.Drawing, System.Windows.Forms; $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); $bmp.Save(\'{full_path}\')"'
-        subprocess.run(ps_cmd, shell=True, check=True)
+        subprocess.run(ps_cmd, shell=True, check=True, timeout=60)
         if os.path.exists(full_path):
             return f"Screenshot saved successfully to: {full_path}"
     except Exception as e:
         return f"Failed to take screenshot: {e}"
+
+# Playwright defaults to 30s per action and no cap on some waits. These are
+# what a person will sit through before deciding the assistant is broken.
+BROWSER_ACTION_TIMEOUT_MS = 15_000
+BROWSER_NAV_TIMEOUT_MS = 30_000
+
 
 class BrowserManager:
     """Manages a persistent Playwright browser session."""
@@ -587,6 +596,13 @@ class BrowserManager:
                 self.page = self.browser.pages[0]
             else:
                 self.page = self.browser.new_page()
+
+            # Playwright's own timeouts, because its sync API is bound to the
+            # thread that created it and so cannot be wrapped in a watchdog
+            # thread like the other tools. A page that never finishes loading
+            # would otherwise hold Ultron's single worker indefinitely.
+            self.browser.set_default_timeout(BROWSER_ACTION_TIMEOUT_MS)
+            self.browser.set_default_navigation_timeout(BROWSER_NAV_TIMEOUT_MS)
 
     def navigate(self, query_or_url: str) -> str:
         """Navigates the browser to a URL or a Google search."""
@@ -1009,14 +1025,8 @@ def system_power_control(action: str) -> str:
     except Exception as e:
         return f"Failed power action: {e}"
 
-def empty_recycle_bin(confirmed: bool = False) -> str:
-    """Empties the Windows Recycle Bin completely.
-    Args:
-        confirmed: Set to True ONLY if the user has explicitly confirmed (e.g., said 'yes', 'confirm', or 'proceed').
-    """
-    if not confirmed:
-        return "CONFIRMATION REQUIRED: Please ask the user for explicit confirmation before emptying the Recycle Bin."
-
+def empty_recycle_bin() -> str:
+    """Permanently empties the Windows Recycle Bin. This cannot be undone."""
     try:
         # SHERB_NOCONFIRMATION (0x1) | SHERB_NOPROGRESSUI (0x2) | SHERB_NOSOUND (0x4)
         flags = 0x1 | 0x2 | 0x4
@@ -1035,6 +1045,11 @@ def clean_temp_files() -> str:
         temp_dir = tempfile.gettempdir()
         deleted_count = 0
         freed_bytes = 0
+        # Files in use by another program cannot be removed, and there are
+        # normally hundreds of them. Counting rather than printing each keeps
+        # the count honest without burying the rest of the log.
+        skipped = 0
+        last_reason = ""
         for root, dirs, files in os.walk(temp_dir):
             for file in files:
                 file_path = os.path.join(root, file)
@@ -1043,10 +1058,15 @@ def clean_temp_files() -> str:
                     os.remove(file_path)
                     deleted_count += 1
                     freed_bytes += size
-                except Exception:
-                    pass
+                except Exception as e:
+                    skipped += 1
+                    last_reason = str(e)
+        if skipped:
+            print(f"[Temp] skipped {skipped} file(s) still in use; last: {last_reason}")
         freed_mb = round(freed_bytes / (1024 * 1024), 2)
-        return f"Temporary files cleaned, sir. Removed {deleted_count} files ({freed_mb} MB freed)."
+        note = f" {skipped} were in use and left alone." if skipped else ""
+        return (f"Temporary files cleaned, sir. Removed {deleted_count} files "
+                f"({freed_mb} MB freed).{note}")
     except Exception as e:
         return f"Failed to clean temp files: {e}"
 
@@ -1066,20 +1086,70 @@ def create_file(file_path: str, content: str = "") -> str:
     except Exception as e:
         return f"Failed to create file: {e}"
 
-def delete_file(file_path: str, confirmed: bool = False) -> str:
-    """Deletes a file from the disk safely.
-    Args:
-        file_path: Path to the file to be deleted.
-        confirmed: Set to True ONLY if the user has explicitly confirmed deletion (e.g., said 'yes', 'confirm', or 'proceed').
-    """
-    if not confirmed:
-        return f"CONFIRMATION REQUIRED: Please ask the user for explicit confirmation before deleting '{file_path}'."
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("wFunc", wintypes.UINT),
+        ("pFrom", wintypes.LPCWSTR),
+        ("pTo", wintypes.LPCWSTR),
+        ("fFlags", ctypes.c_uint16),
+        ("fAnyOperationsAborted", wintypes.BOOL),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", wintypes.LPCWSTR),
+    ]
 
+
+_FO_DELETE = 0x0003
+# ALLOWUNDO is the whole point: it routes through the Recycle Bin instead of
+# unlinking. The rest suppress Explorer's own dialogs, which would otherwise
+# block a background thread waiting for a click nobody can see.
+_FOF_SILENT = 0x0004
+_FOF_NOCONFIRMATION = 0x0010
+_FOF_ALLOWUNDO = 0x0040
+_FOF_NOERRORUI = 0x0400
+
+
+def recycle_path(path: str) -> str:
+    """Moves a file or folder to the Recycle Bin. Returns '' on success.
+
+    Deleting outright is unrecoverable, and an assistant acting on a misheard
+    filename is exactly the case where recovery matters. The Recycle Bin turns
+    a mistake into an inconvenience.
+    """
+    absolute = os.path.abspath(path)
+    if not os.path.exists(absolute):
+        return f"does not exist: '{path}'"
+
+    operation = _SHFILEOPSTRUCTW()
+    operation.wFunc = _FO_DELETE
+    # The API takes a double-null-terminated list, not a plain string.
+    operation.pFrom = absolute + "\0\0"
+    operation.fFlags = (
+        _FOF_ALLOWUNDO | _FOF_NOCONFIRMATION | _FOF_SILENT | _FOF_NOERRORUI
+    )
+
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result != 0:
+        return f"Windows refused the operation (code {result})"
+    if operation.fAnyOperationsAborted:
+        return "the operation was aborted"
+    return ""
+
+
+def delete_file(file_path: str) -> str:
+    """Moves a file to the Recycle Bin, where it can still be restored.
+
+    Args:
+        file_path: Path to the file to remove.
+    """
     try:
         if not os.path.exists(file_path):
             return f"File does not exist: '{file_path}'"
-        os.remove(file_path)
-        return f"Successfully deleted file '{file_path}', sir."
+        problem = recycle_path(file_path)
+        if problem:
+            return f"Failed to delete file: {problem}"
+        return (f"Moved '{file_path}' to the Recycle Bin, sir. "
+                "It can be restored from there if that was a mistake.")
     except Exception as e:
         return f"Failed to delete file: {e}"
 
