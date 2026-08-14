@@ -167,7 +167,11 @@ class Database:
                 # Kept alongside the semantic document so a memory can be shown
                 # and deleted without having to parse it back out of the text.
                 "value": value,
-                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                # Microseconds, not seconds: several memories are routinely
+                # saved within the same second, and a tie here falls through
+                # to the random uuid — which would shuffle the numbers the
+                # user was just shown.
+                "saved_at": datetime.now().isoformat(timespec="microseconds"),
             }],
             ids=[doc_id]
         )

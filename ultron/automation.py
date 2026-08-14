@@ -67,6 +67,12 @@ def _clean_folder_name(text: str) -> str:
                 cleaned = cleaned[len(word) + 1:].strip()
                 changed = True
                 break
+
+    # "the folder" reduces to "the", which is filler, not a name. Searching
+    # every drive for it would return noise; better to have nothing and let
+    # the caller ask which folder was meant.
+    if cleaned.lower() in _LEADING_WORDS or cleaned.lower() in _TRAILING_WORDS:
+        return ""
     return cleaned
 
 

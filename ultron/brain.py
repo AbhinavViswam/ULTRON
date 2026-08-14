@@ -104,7 +104,8 @@ TOOL_TIMEOUT_SECONDS = {
     "send_whatsapp_message": 180,
     # Walks the filesystem.
     "find_files": 60,
-    "find_folders": 60,
+    # Resolves a spoken folder name by searching the drives.
+    "open_folder": 60,
     "clean_temp_files": 300,
     "empty_recycle_bin": 120,
     # Network round trips to Google.
@@ -650,7 +651,15 @@ class Brain:
             lines = []
             for number, memory in enumerate(memories, 1):
                 category = f"[{memory['category']}] " if memory["category"] else ""
-                when = f" — saved {memory['saved_at']}" if memory["saved_at"] else ""
+                when = ""
+                if memory["saved_at"]:
+                    # Stored to the microsecond for ordering; nobody wants to
+                    # read that.
+                    try:
+                        stamp = datetime.datetime.fromisoformat(memory["saved_at"])
+                        when = f" — saved {stamp:%Y-%m-%d %H:%M}"
+                    except ValueError:
+                        when = f" — saved {memory['saved_at']}"
                 lines.append(
                     f"{number}. {category}{memory['key']}: {memory['value']} "
                     f"(importance {memory['importance']}){when}"
