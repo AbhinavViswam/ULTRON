@@ -98,6 +98,8 @@ TOOL_LABELS = {
     "list_reminders": "checking your reminders",
     "delete_reminder": "removing a reminder",
     "get_selected_file_in_explorer": "checking Explorer",
+    "get_current_explorer_folder": "checking which folder you are in",
+    "list_current_explorer_folder": "looking in your current folder",
     "run_workflow_tool": "running a workflow",
 }
 

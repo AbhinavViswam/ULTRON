@@ -18,7 +18,10 @@ from ultron.automation import (
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
     copy_file, move_file, release_stuck_keys
 )
-from ultron.plugins.explorer_plugin import get_selected_file_in_explorer
+from ultron.plugins.explorer_plugin import (
+    get_selected_file_in_explorer, get_current_explorer_folder,
+    list_current_explorer_folder
+)
 from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
 from ultron.plugins.docker_plugin import (
     docker_list_containers, docker_list_images, docker_start_container,
@@ -294,6 +297,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "copy_file", "move_file", "list_directory", "open_folder",
         "read_clipboard", "copy_to_clipboard", "write_in_notepad",
         "read_document", "get_selected_file_in_explorer",
+        "get_current_explorer_folder", "list_current_explorer_folder",
     ],
     # System health, power, disk cleanup
     "system_health": [
@@ -837,6 +841,8 @@ class Brain:
             "list_directory": list_directory,
             "open_folder": open_folder,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
+            "get_current_explorer_folder": get_current_explorer_folder,
+            "list_current_explorer_folder": list_current_explorer_folder,
             "read_document": read_document,
             # ── Communication ─────────────────────────────────────────────
             "send_whatsapp_message": send_whatsapp_message,
@@ -959,6 +965,7 @@ Examples of autonomous behaviour:
 - FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files (ALWAYS prefer this for saving text — it's fast and reliable), `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
 - WRITING TEXT: To save text to a file silently, use `create_file`. Only use `write_in_notepad` when the user explicitly wants to SEE Notepad open with the text visible on screen.
 - SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
+- CURRENT FOLDER: If the user says "this folder", "here", "the folder I am in", or "the current folder", use `get_current_explorer_folder` to find out exactly where they are looking, or `list_current_explorer_folder` to see what is in it. Never guess a path when these can tell you.
 - READING DOCUMENTS: Use `read_document` to read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP). For images, it extracts text using OCR. If a PDF/DOCX is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
 - DESTRUCTIVE ACTIONS: Ultron itself asks the user to approve anything destructive (`delete_file`, `empty_recycle_bin`, `clean_temp_files`, shutting down, deleting reminders or workflows) — you do not need a confirmation argument, and you cannot approve on the user's behalf. Call the tool when the user asks for it; a prompt appears and the tool runs only if they agree. If the result says the user did not approve, tell them plainly that nothing was changed and do not try again.
