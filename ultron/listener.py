@@ -1,3 +1,4 @@
+import collections
 import os
 import sys
 import time
@@ -6,16 +7,61 @@ import sounddevice as sd
 import speech_recognition as sr
 import threading
 
+# Voice activity is judged 20ms at a time, and so is the noise floor.
+FRAME_SECONDS = 0.02
+
+# Long enough that a passing noise is a small share of the sample.
+CALIBRATION_SECONDS = 1.5
+
+# The first moments after a stream opens belong to the driver, not the room.
+CALIBRATION_DISCARD_SECONDS = 0.2
+
+# The room's floor is where it sits *most* of the time. A low percentile finds
+# that; an average is dragged upwards by every clack, cough and passing car.
+NOISE_PERCENTILE = 25
+
+# How far above the floor something has to be to count as speech.
+THRESHOLD_MULTIPLIER = 3.0
+
+# Never so low that the room's own hiss counts as talking...
+MIN_THRESHOLD = 10.0
+
+# ...and never so high that Ultron cannot hear. A threshold this high means
+# calibration went wrong, and being over-sensitive is the better failure: the
+# recogniser discards noise, whereas nothing recovers a word never captured.
+MAX_THRESHOLD = 300.0
+
+# Retuning watches this much recent audio. Speech has to be under
+# NOISE_PERCENTILE of it for the floor to stay put, which a sentence at a time
+# comfortably is.
+NOISE_WINDOW_SECONDS = 6.0
+RETUNE_EVERY_SECONDS = 2.0
+
+# The floor drops quickly when a room goes quiet, and rises slowly, so a burst
+# of talking cannot walk the threshold up mid-conversation and cut you off.
+FLOOR_RISE_RATE = 0.10
+FLOOR_FALL_RATE = 0.50
+
+
 class VoiceListener:
     """Continuous background microphone listener using sounddevice and SpeechRecognition with dynamic noise calibration."""
     def __init__(self, callback_func=None, sample_rate=16000):
         self.sample_rate = sample_rate
         self.callback_func = callback_func
         self.recognizer = sr.Recognizer()
+        # Optional veto, called with each transcription before it is delivered.
+        # Set by the core so Ultron does not answer its own voice coming back
+        # through the speakers.
+        self.ignore_check = None
         self.is_listening = False
         self.thread = None
         self.speech_threshold = 15.0
         self._level_listeners = []
+
+        # Recent chunk loudness, for following the room as it changes.
+        self._noise_floor = MIN_THRESHOLD / THRESHOLD_MULTIPLIER
+        self._recent_levels = collections.deque()
+        self._last_retune = 0.0
 
     def on_level(self, callback):
         """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
@@ -34,19 +80,71 @@ class VoiceListener:
             except Exception as e:
                 print(f"[Voice Engine] level listener failed: {e}")
 
+    def noise_floor(self, samples) -> float:
+        """The level the room sits at, ignoring whatever briefly happened in it.
+
+        Averaging the whole window squares every sample, so one 60ms clack in
+        an otherwise silent room moved the measured floor from 0.5 to over 270
+        — and the threshold with it. Scoring 20ms frames and taking a low
+        percentile asks a different question: not "how loud was that window"
+        but "how loud is it here normally", which is the one that matters.
+        """
+        samples = np.asarray(samples, dtype=float).ravel()
+        frame = int(self.sample_rate * FRAME_SECONDS)
+        usable = len(samples) // frame * frame
+        if usable < frame:
+            # Too short to frame at all; the plain RMS is all there is.
+            return float(np.sqrt(np.mean(samples ** 2))) if len(samples) else 0.0
+        frames = samples[:usable].reshape(-1, frame)
+        return float(np.percentile(np.sqrt((frames ** 2).mean(axis=1)),
+                                   NOISE_PERCENTILE))
+
+    def threshold_for(self, floor: float) -> float:
+        """The speech threshold a given noise floor deserves, within limits."""
+        return float(min(max(floor * THRESHOLD_MULTIPLIER, MIN_THRESHOLD),
+                         MAX_THRESHOLD))
+
     def calibrate(self):
-        """Calibrates background ambient noise for 0.8 seconds to set dynamic speech threshold."""
+        """Measures the room once, to start from something sensible.
+
+        This is only a starting point now. Whatever happens during these two
+        seconds, _retune corrects it within a few seconds of listening — which
+        is what stops a single noise here from deafening Ultron for the rest
+        of the session.
+        """
         try:
             print("[Voice Engine] Calibrating microphone ambient noise...")
-            recording = sd.rec(int(self.sample_rate * 0.8), samplerate=self.sample_rate, channels=1, dtype='int16')
+            recording = sd.rec(int(self.sample_rate * CALIBRATION_SECONDS),
+                               samplerate=self.sample_rate, channels=1, dtype='int16')
             sd.wait()
-            ambient_rms = float(np.sqrt(np.mean(recording.astype(float)**2)))
-            # Set threshold to 1.5x ambient noise level, minimum floor of 10.0 for high sensitivity
-            self.speech_threshold = max(ambient_rms * 1.5, 10.0)
-            print(f"[Voice Engine] Calibration complete. Sensitivity threshold set to {self.speech_threshold:.1f}")
+            samples = recording.astype(float).ravel()
+            samples = samples[int(self.sample_rate * CALIBRATION_DISCARD_SECONDS):]
+
+            self._noise_floor = self.noise_floor(samples)
+            self.speech_threshold = self.threshold_for(self._noise_floor)
+            print(f"[Voice Engine] Calibration complete. Noise floor "
+                  f"{self._noise_floor:.1f}, sensitivity threshold set to "
+                  f"{self.speech_threshold:.1f}")
         except Exception as e:
             print(f"[Voice Engine Warning] Microphone calibration error: {e}")
-            self.speech_threshold = 20.0
+            self._noise_floor = MIN_THRESHOLD / THRESHOLD_MULTIPLIER
+            self.speech_threshold = MIN_THRESHOLD
+
+    def _retune(self):
+        """Follows the room while listening, so a bad calibration self-corrects.
+
+        Deliberately independent of whether a chunk was judged to be speech: if
+        the threshold is badly wrong then that judgement is wrong too, and a
+        loop that trusts it stays stuck. A low percentile of recent audio needs
+        no such judgement — speech is a minority of any normal few seconds.
+        """
+        if len(self._recent_levels) < 8:
+            return
+
+        observed = float(np.percentile(self._recent_levels, NOISE_PERCENTILE))
+        rate = FLOOR_RISE_RATE if observed > self._noise_floor else FLOOR_FALL_RATE
+        self._noise_floor += (observed - self._noise_floor) * rate
+        self.speech_threshold = self.threshold_for(self._noise_floor)
 
     def _listen_loop(self):
         """Continuously streams microphone data in background chunks and detects voice activity."""
@@ -60,8 +158,26 @@ class VoiceListener:
             
             # Calculate current chunk RMS energy
             rms = float(np.sqrt(np.mean(indata.astype(float)**2)))
-            
+
             nonlocal is_speaking, silence_start, buffer
+
+            # Keep roughly NOISE_WINDOW_SECONDS of history. Chunk size is the
+            # driver's choice and can change, so it is measured rather than
+            # assumed.
+            if self._recent_levels.maxlen is None and frames:
+                chunks = max(4, int(NOISE_WINDOW_SECONDS /
+                                    (frames / self.sample_rate)))
+                self._recent_levels = collections.deque(self._recent_levels,
+                                                        maxlen=chunks)
+            self._recent_levels.append(rms)
+
+            now = time.time()
+            if now - self._last_retune >= RETUNE_EVERY_SECONDS:
+                self._last_retune = now
+                # Never mid-phrase: the threshold that started this phrase is
+                # the one that should decide where it ends.
+                if not is_speaking:
+                    self._retune()
 
             if self._level_listeners:
                 # Scale against the calibrated threshold so the reported level
@@ -101,10 +217,18 @@ class VoiceListener:
             raw_bytes = audio_np.tobytes()
             audio_data = sr.AudioData(raw_bytes, self.sample_rate, 2)
             text = self.recognizer.recognize_google(audio_data)
-            if text and text.strip():
-                print(f"\n\n[Voice Input Detected]: {text}")
-                if self.callback_func:
-                    self.callback_func(text)
+            if not text or not text.strip():
+                return
+
+            # Asked before the callback, not after: the callback interrupts
+            # speech and runs the command, so a late check would still have
+            # let Ultron cut itself off and obey its own voice.
+            if self.ignore_check and self.ignore_check(text):
+                return
+
+            print(f"\n\n[Voice Input Detected]: {text}")
+            if self.callback_func:
+                self.callback_func(text)
         except sr.UnknownValueError:
             # Speech that could not be made out. Expected many times a minute
             # in a noisy room, so logging each one would bury everything else.
@@ -119,6 +243,10 @@ class VoiceListener:
             self.callback_func = callback_func
             
         if not self.is_listening:
+            # Start from a clean slate; the device may have changed since the
+            # last session, and stale levels would be retuned against.
+            self._recent_levels = collections.deque()
+            self._last_retune = time.time()
             self.calibrate()
             self.is_listening = True
             self.thread = threading.Thread(target=self._listen_loop, daemon=True)

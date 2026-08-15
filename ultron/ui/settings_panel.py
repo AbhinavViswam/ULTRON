@@ -157,6 +157,11 @@ class SettingsPanel(QWidget):
         form.addWidget(_section("Assistant"))
         self.mic_check = QCheckBox("Continuous background microphone")
         form.addWidget(self.mic_check)
+        self.self_hearing_check = QCheckBox(
+            "Ignore my own voice coming back through the speakers")
+        self.self_hearing_check.setToolTip(
+            "Only matters on speakers. Turn it off if you use headphones.")
+        form.addWidget(self.self_hearing_check)
         self.truth_check = QCheckBox("Truth mode (never guess or fabricate)")
         form.addWidget(self.truth_check)
 
@@ -296,6 +301,8 @@ class SettingsPanel(QWidget):
 
         self.mic_check.setChecked(bool(config.get("microphone_active", True)))
         self.truth_check.setChecked(bool(config.get("truth_mode", False)))
+        self.self_hearing_check.setChecked(
+            bool(config.get("self_hearing_guard", True)))
 
         # Reflects the Startup folder, not settings.json, so read it from disk
         # without letting the signal fire back and rewrite the shortcut.
@@ -332,6 +339,7 @@ class SettingsPanel(QWidget):
         updates["local_api_url"] = self.local_url_edit.text().strip() or "http://localhost:11434/v1"
         updates["microphone_active"] = self.mic_check.isChecked()
         updates["truth_mode"] = self.truth_check.isChecked()
+        updates["self_hearing_guard"] = self.self_hearing_check.isChecked()
         updates["idle_chat.enabled"] = self.idle_check.isChecked()
         updates["idle_chat.after_minutes"] = self.idle_after_spin.value()
         updates["idle_chat.quiet_start_hour"] = self.quiet_start_spin.value()

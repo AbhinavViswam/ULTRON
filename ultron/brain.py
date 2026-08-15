@@ -91,6 +91,7 @@ DESTRUCTIVE_TOOLS = {
         f"forget the memory matching '{args.get('which', '?')}'"
     ),
     "delete_workflow": lambda args: f"delete the workflow '{args.get('name', '?')}'",
+    "delete_routine": lambda args: f"delete the routine '{args.get('name', '?')}'",
 }
 
 
@@ -266,8 +267,12 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "core": [
         "save_memory", "search_memories", "search_past_conversations",
         "list_memories", "delete_memory",
+        "create_routine", "list_routines", "run_routine_now",
+        "enable_routine", "disable_routine", "delete_routine",
+        "reschedule_routine", "last_routine_result",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+        "snooze_reminder",
         # Always reachable: if a modifier is stuck the user cannot type
         # comfortably, so asking by voice must work whatever else is loaded.
         "release_stuck_keys",
@@ -559,6 +564,12 @@ class Brain:
         # Set by whichever front end can actually ask the user a question.
         # Until then, destructive tools have nobody to ask and are refused.
         self.confirm_handler = None
+        # True while a scheduled routine is running. Nobody is present to
+        # approve anything, so destructive tools are refused outright rather
+        # than blocking on a confirmation that will never come.
+        self.unattended = False
+        # Set by the runtime, which owns the queue routines have to run on.
+        self.routine_runner = None
         # Ids from the last list_memories, so "forget number 3" means the
         # third thing the user was actually shown.
         self._memory_listing = []
@@ -622,6 +633,65 @@ class Brain:
             self.db.delete_task(task_id)
             return f"Reminder [{task_id}] deleted."
 
+        def snooze_reminder(minutes: int = 10, which: str = "") -> str:
+            """Pushes a reminder back by a number of minutes. Use this for 'snooze it', 'remind me again in 20 minutes', 'not now, later'.
+
+            Args:
+                minutes: How long to push it back by. Defaults to 10.
+                which: Part of the reminder's description. Leave empty to snooze
+                    the one that just went off.
+            """
+            try:
+                minutes = int(minutes)
+            except (TypeError, ValueError):
+                return f"Error: '{minutes}' is not a number of minutes."
+            if minutes <= 0:
+                return "Error: a snooze has to be at least one minute."
+
+            when = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+            stamp = when.strftime("%I:%M %p").lstrip("0")
+
+            # No description given: the user said "snooze it" straight after
+            # hearing one, and meant that one.
+            if not which.strip():
+                if not self.last_fired_reminder:
+                    pending = self.db.get_pending_tasks()
+                    if len(pending) != 1:
+                        return ("Which reminder should I snooze, sir? "
+                                + list_reminders())
+                    which = pending[0][1]
+                else:
+                    fired = self.last_fired_reminder
+                    # A recurring reminder keeps its schedule. Moving it would
+                    # snooze every future occurrence, which is not what anyone
+                    # means by "snooze"; a one-off copy is.
+                    self.db.add_task(fired["description"], when.isoformat())
+                    return f"'{fired['description']}' snoozed — I will remind you again at {stamp}."
+
+            needle = which.strip().lower()
+            matches = [t for t in self.db.get_pending_tasks() if needle in t[1].lower()]
+            if not matches:
+                # It may have already fired and been cleared from the table.
+                if self.last_fired_reminder and needle in self.last_fired_reminder["description"].lower():
+                    self.db.add_task(self.last_fired_reminder["description"], when.isoformat())
+                    return f"'{self.last_fired_reminder['description']}' snoozed — I will remind you again at {stamp}."
+                return f"Sir, I have no reminder matching '{which}'."
+            if len(matches) > 1:
+                names = ", ".join(f'"{t[1]}"' for t in matches[:5])
+                return f"Which one, sir — {names}?"
+
+            task = matches[0]
+            task_id, description = task[0], task[1]
+            frequency = task[4] if len(task) > 4 else None
+
+            if frequency:
+                self.db.add_task(description, when.isoformat())
+                return (f"'{description}' snoozed to {stamp}, sir. Its {frequency} "
+                        "schedule is unchanged.")
+
+            self.db.update_task_time(task_id, when.isoformat())
+            return f"'{description}' moved to {stamp}, sir."
+
         def list_reminders() -> str:
             """Lists all pending reminders. Use this when the user asks to see, show, or list their reminders."""
             tasks = self.db.get_pending_tasks()
@@ -637,6 +707,139 @@ class Brain:
                 freq_str = f" (repeats {frequency})" if frequency else ""
                 lines.append(f"- [{task_id}] \"{desc}\" - scheduled for {scheduled_for}{freq_str}")
             return f"Pending reminders ({len(tasks)}):\n" + "\n".join(lines)
+        def create_routine(name: str, instruction: str, when: str,
+                           at_time: str = "08:00", deliver: str = "speak,card") -> str:
+            """Creates a routine: an instruction Ultron carries out on a schedule.
+
+            Unlike a reminder, which just says a sentence, a routine actually does
+            the work — it can search the web, check things and use tools.
+
+            Args:
+                name: Short name, e.g. 'Day in history'.
+                instruction: What to do, written as an order, e.g. 'Search the web
+                    for what is notable about today and tell me the highlights'.
+                when: 'daily', 'weekdays', 'weekends', 'monday and friday',
+                    'every 3 days', 'monthly on the 15th', or a date '2026-08-26'.
+                at_time: Time of day, e.g. '08:00' or '7 pm'.
+                deliver: Any of speak, card, toast, file — comma separated.
+            """
+            from ultron import routines as sched
+
+            name = (name or "").strip()
+            instruction = (instruction or "").strip()
+            if not name or not instruction:
+                return "Error: a routine needs a name and an instruction."
+            if any(r["name"].lower() == name.lower() for r in self.db.list_routines()):
+                return f"Error: a routine called '{name}' already exists."
+
+            try:
+                schedule = sched.parse_schedule(when, at_time)
+            except sched.ScheduleError as e:
+                return f"Error: {e}"
+
+            following = sched.next_run(schedule)
+            if following is None:
+                return f"Error: '{when}' has no future occurrence."
+
+            self.db.add_routine(name, instruction, schedule,
+                                following.isoformat(), deliver)
+            return (f"Routine '{name}' created — {sched.describe(schedule)}. "
+                    f"First run {following:%A %d %B at %H:%M}. "
+                    "Say 'run the routine now' to try it before then.")
+
+        def list_routines() -> str:
+            """Lists every routine, its schedule and when it last ran."""
+            from ultron import routines as sched
+
+            items = self.db.list_routines()
+            if not items:
+                return "No routines set up yet, sir."
+            lines = []
+            for routine in items:
+                state = "" if routine["enabled"] else "  [disabled]"
+                last = f"  last ran {routine['last_run'][:16]}" if routine["last_run"] else ""
+                lines.append(
+                    f"- [{routine['id']}] {routine['name']}: "
+                    f"{sched.describe(routine['schedule'])}{state}{last}"
+                )
+            return f"Routines ({len(items)}):\n" + "\n".join(lines)
+
+        def run_routine_now(name: str) -> str:
+            """Runs a routine immediately, without waiting for its schedule.
+
+            Use this to try a routine out after creating it.
+            """
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            if self.routine_runner is None:
+                return "Error: routines cannot be run right now."
+            # Queued rather than run here: this call is already inside a turn,
+            # and running one turn inside another would tangle the history.
+            self.routine_runner(routine)
+            return (f"Running '{routine['name']}' now, sir — I will report back "
+                    "in a moment.")
+
+        def enable_routine(name: str) -> str:
+            """Switches a routine back on."""
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            from ultron import routines as sched
+            following = sched.next_run(routine["schedule"])
+            self.db.update_routine(
+                routine["id"], enabled=1, fail_count=0,
+                next_run=following.isoformat() if following else None)
+            return f"Routine '{routine['name']}' is on again, sir."
+
+        def disable_routine(name: str) -> str:
+            """Switches a routine off without deleting it."""
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            self.db.update_routine(routine["id"], enabled=0)
+            return f"Routine '{routine['name']}' is off, sir. It still exists."
+
+        def delete_routine(name: str) -> str:
+            """Deletes a routine permanently."""
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            self.db.delete_routine(routine["id"])
+            return f"Routine '{routine['name']}' deleted, sir."
+
+        def reschedule_routine(name: str, when: str, at_time: str = "") -> str:
+            """Changes when a routine runs. Same 'when' wording as create_routine."""
+            from ultron import routines as sched
+
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            try:
+                schedule = sched.parse_schedule(
+                    when, at_time or routine["schedule"]["at_time"])
+            except sched.ScheduleError as e:
+                return f"Error: {e}"
+            following = sched.next_run(schedule)
+            if following is None:
+                return f"Error: '{when}' has no future occurrence."
+            self.db.set_routine_schedule(routine["id"], schedule, following.isoformat())
+            return (f"Routine '{routine['name']}' now runs "
+                    f"{sched.describe(schedule)}. Next {following:%A %d %B at %H:%M}.")
+
+        def last_routine_result(name: str) -> str:
+            """What a routine found the last time it ran.
+
+            Use this for follow-up questions about something a routine reported.
+            """
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            if not routine["last_result"]:
+                return f"Routine '{routine['name']}' has not produced anything yet."
+            return (f"'{routine['name']}' last ran {routine['last_run'][:16]} "
+                    f"and reported:\n{routine['last_result']}")
+
         def list_memories() -> str:
             """Lists everything Ultron has remembered about the user, numbered.
 
@@ -786,6 +989,14 @@ class Brain:
             "save_memory": save_memory,
             "search_memories": search_memories,
             "list_memories": list_memories,
+            "create_routine": create_routine,
+            "list_routines": list_routines,
+            "run_routine_now": run_routine_now,
+            "enable_routine": enable_routine,
+            "disable_routine": disable_routine,
+            "delete_routine": delete_routine,
+            "reschedule_routine": reschedule_routine,
+            "last_routine_result": last_routine_result,
             "delete_memory": delete_memory,
             "search_past_conversations": search_past_conversations,
             "set_reminder": set_reminder,
@@ -793,6 +1004,7 @@ class Brain:
             "set_recurring_reminder": set_recurring_reminder,
             "set_recurring_reminder_at": set_recurring_reminder_at,
             "list_reminders": list_reminders,
+            "snooze_reminder": snooze_reminder,
             "delete_reminder": delete_reminder,
             # ── System & Apps ──────────────────────────────────────────────
             "open_application": open_application,
@@ -890,7 +1102,18 @@ class Brain:
         
         # Initialize conversation history
         self.messages = [{"role": "system", "content": sys_instruct}]
-        
+
+        # Unprompted lines — reminders, routines, idle remarks — said while a
+        # turn was in flight, waiting to be folded in before the next one.
+        self._in_turn = False
+        self._pending_unprompted = []
+
+        # The reminder that most recently went off, so that a bare "snooze it"
+        # has something to act on. A one-off reminder is deleted the moment it
+        # fires, so by the time the user answers it is no longer in the table
+        # and this is the only record of it.
+        self.last_fired_reminder = None
+
         print("Ultron's Brain initialized and ready.")
 
     def _get_truth_mode_instructions(self) -> str:
@@ -921,6 +1144,7 @@ You are currently operating in TRUTH MODE. You must strictly adhere to the follo
   - If that clock time REPEATS ("every day at 10:20 am", "daily at 6pm"), use `set_recurring_reminder_at` with `time_str` and `frequency` ('hourly', 'daily', 'weekly', 'monthly').
   - Only if the user gives a DURATION ("in 5 minutes") use `set_reminder` with `delay_seconds`, or `set_recurring_reminder` with `start_delay_seconds`.
   - To show reminders use `list_reminders`; to remove one use `list_reminders` first, then `delete_reminder` with its id.
+  - To push a reminder back ("snooze it", "remind me again in 20 minutes") use `snooze_reminder`. NEVER say a reminder has been moved, snoozed or rescheduled unless this tool actually ran and reported success.
 
 # BROWSER AUTOMATION
 You have full interactive control over a web browser.
@@ -950,6 +1174,8 @@ Examples of autonomous behaviour:
 - "Play something relaxing" → web_search("top relaxing instrumental songs") → pick → search_spotify
 - "Play the latest hits" → web_search("top songs this week") → pick → search_spotify
 - "Play music" → search_spotify("top hits 2024") directly (broad enough to work without pre-search)
+
+WHAT `search_spotify` ACTUALLY DOES: it opens Spotify showing the search results. It does NOT start playback. Never tell the user music is playing, has started, or will begin shortly. Say you have brought up the results and they can pick one. Claiming a song is playing when the screen shows a list of results is worse than saying nothing.
 
 # SCREEN AWARENESS
 - PRIMARY: If the user asks "what is on my screen", "what do you see", or asks about a visible element, use `screen_read`. This is fast and returns a text summary of all visible UI controls and text. It works with any model (no vision needed). You can pass a `window_title` to read a specific window even if it is not focused.
@@ -1271,6 +1497,121 @@ Your response: Let me find some great Malayalam songs for you, sir.
         # inferred and let the caller refuse.
         return ""
 
+    def history_budget(self) -> int:
+        """Roughly how many tokens of conversation to keep.
+
+        The local default comes from measurement, not taste. Ollama serves
+        gemma4:e2b with a 16,384 token window; the system prompt alone is
+        ~6,600 of it, and a turn that makes tool calls adds its own results and
+        reply on top — a single web search came to ~1,500. Leaving 4,000 for
+        the conversation keeps roughly 5,800 free for the turn in progress.
+
+        A hosted model has room to spare but bills for every token of it, so
+        the limit there is about cost rather than capacity.
+
+        Set "max_history_tokens" in settings.json to override either.
+        """
+        configured = config.get("max_history_tokens", None)
+        if configured is not None:
+            try:
+                return int(configured)
+            except (TypeError, ValueError):
+                print(f"[Brain] max_history_tokens is not a number: {configured!r}")
+        return 4000 if self.active_api == "localapi" else 24000
+
+    @staticmethod
+    def _message_size(message: dict) -> int:
+        """A rough token count. Four characters to a token is close enough to
+        decide what to drop, and costs nothing to compute."""
+        size = len(message.get("content") or "")
+        calls = message.get("tool_calls")
+        if calls:
+            try:
+                size += len(json.dumps(calls, default=str))
+            except (TypeError, ValueError):
+                size += 200
+        return size // 4 + 4  # a few tokens of role and framing per message
+
+    def _trim_history(self):
+        """Drops the oldest exchanges once the transcript outgrows its budget.
+
+        Nothing trimmed here is lost: every message is in chat_history, and
+        `search_past_conversations` reaches all of it. This only decides what
+        is worth re-sending on every single request.
+
+        The care needed is in *where* the cut lands. A "tool" message is only
+        valid if the assistant message that requested it is still above it, so
+        dropping a tool_calls message while keeping its results produces a
+        history the API rejects outright — a hard failure in the middle of a
+        conversation. The cut is therefore pushed forward past any orphaned
+        results before it is applied.
+        """
+        budget = self.history_budget()
+        if budget <= 0 or len(self.messages) <= 2:
+            return
+
+        sizes = [self._message_size(m) for m in self.messages]
+        # The budget covers the conversation only. The system prompt is fixed
+        # overhead — on the local path it is some 12,000 tokens of embedded
+        # tool descriptions — and counting it here would mean trimming the
+        # entire conversation away to make room for something untrimmable.
+        conversation = sum(sizes[1:])
+        if conversation <= budget:
+            return
+
+        cut = 1
+        while cut < len(self.messages) and conversation > budget:
+            conversation -= sizes[cut]
+            cut += 1
+
+        while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
+            cut += 1
+
+        dropped = cut - 1
+        if dropped <= 0:
+            return
+
+        self.messages = [self.messages[0]] + self.messages[cut:]
+        print(f"[Brain] conversation reached ~{sum(sizes[1:])} tokens; dropped "
+              f"the {dropped} oldest messages (still searchable via "
+              f"search_past_conversations)")
+
+    def note_unprompted_line(self, text: str):
+        """Records something Ultron said on its own initiative as a real turn.
+
+        Idle remarks are composed by a separate one-shot model call that never
+        touched `self.messages`, so as far as the conversation was concerned
+        they were never said. Ultron would offer to play Arijit Singh, the user
+        would answer "yes, do it", and Ultron had no idea what "it" was.
+
+        Safe to call from any thread at any moment. A reminder can fire in the
+        middle of a turn, and an assistant message dropped between a tool_calls
+        message and its results is a malformed history the API rejects — so
+        anything said mid-turn is held and flushed before the next one.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+
+        if self._in_turn:
+            self._pending_unprompted.append(text)
+            return
+
+        self.messages.append({"role": "assistant", "content": text})
+        # Also into the searchable chat log, so "what did you say earlier?"
+        # can find it the same way it finds anything else Ultron has said.
+        try:
+            self.db.save_message(session_id=self.session_id, role='model', message=text)
+        except Exception as e:
+            print(f"[Brain] could not log an unprompted line: {e}")
+
+    def _flush_unprompted(self):
+        """Adds anything said mid-turn, in the order it was said."""
+        while self._pending_unprompted:
+            held = self._pending_unprompted.pop(0)
+            self._in_turn = False
+            self.note_unprompted_line(held)
+
     def on_tool_event(self, callback):
         """Registers callback(phase, name, detail) for every tool invocation.
 
@@ -1332,6 +1673,42 @@ Your response: Let me find some great Malayalam songs for you, sir.
             return None, (f"Error: '{text}' matches {len(matches)} memories ({listed}). "
                           "Ask the user which one they mean, then use its number.")
         return matches[0], None
+
+    def _resolve_routine(self, name):
+        """Finds a routine by id or name. Returns (routine, problem)."""
+        text = str(name or "").strip().strip("#.\"'")
+        if not text:
+            return None, "Error: say which routine you mean."
+
+        items = self.db.list_routines()
+        if not items:
+            return None, "There are no routines set up yet, sir."
+
+        if text.isdigit():
+            match = next((r for r in items if r["id"] == int(text)), None)
+            if match:
+                return match, None
+            return None, f"Error: there is no routine {text}. Call list_routines."
+
+        lowered = text.lower()
+        exact = [r for r in items if r["name"].lower() == lowered]
+        if exact:
+            return exact[0], None
+        partial = [r for r in items if lowered in r["name"].lower()]
+        if not partial:
+            return None, (f"Error: no routine matches '{text}'. Call list_routines "
+                          "to see what exists.")
+        if len(partial) > 1:
+            names = ", ".join(f"'{r['name']}'" for r in partial[:5])
+            return None, (f"Error: '{text}' matches {len(partial)} routines "
+                          f"({names}). Ask the user which one they mean.")
+        return partial[0], None
+
+    def _detail_delete_routine(self, args: dict):
+        routine, problem = self._resolve_routine(args.get("name"))
+        if problem or not routine:
+            return None
+        return f"delete the routine '{routine['name']}'"
 
     def _detail_delete_memory(self, args: dict):
         """Names the actual memory on the confirmation card, not the search term."""
@@ -1422,6 +1799,12 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 question = detailer(clean_args) or question
             except Exception as e:
                 print(f"[Confirm] could not describe {func_name} precisely: {e}")
+
+        if self.unattended:
+            print(f"[Confirm] {func_name} refused — running unattended")
+            return (f"Error: {func_name} cannot run inside a scheduled routine, "
+                    "because nobody is present to approve it. Report what you "
+                    "found instead, and let the user do this themselves.")
 
         if self.confirm_handler is None:
             print(f"[Confirm] {func_name} refused — no confirmation handler")
@@ -1550,10 +1933,21 @@ Your response: Let me find some great Malayalam songs for you, sir.
 
     def process_input(self, user_text: str) -> str:
         """Routes user input to the appropriate handler based on the active API."""
-        if self.active_api == "localapi":
-            return self._process_input_local(user_text)
-        else:
-            return self._process_input_cloud(user_text)
+        # Anything Ultron said while the last turn was still running goes in
+        # first, so it sits before this message rather than inside the turn
+        # that was in flight.
+        self._flush_unprompted()
+        # Between turns is the only safe moment: mid-turn the history contains
+        # a tool call waiting on its results.
+        self._trim_history()
+        self._in_turn = True
+        try:
+            if self.active_api == "localapi":
+                return self._process_input_local(user_text)
+            else:
+                return self._process_input_cloud(user_text)
+        finally:
+            self._in_turn = False
 
     def _process_input_local(self, user_text: str) -> str:
         """Process input using a local model with manual text-based tool calling.

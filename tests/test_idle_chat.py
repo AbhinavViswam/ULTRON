@@ -338,3 +338,159 @@ class TestPlumbing:
         assert "idle_chat" in defaults
         for key in ("enabled", "after_minutes", "quiet_start_hour", "quiet_end_hour"):
             assert key in defaults["idle_chat"]
+
+
+class TestItRemembersWhatItOffered:
+    """An offer Ultron makes on its own must survive into the conversation.
+
+    Without this the line exists only as audio: Ultron says "shall I play some
+    Arijit Singh, sir?", the user says "yes, do it", and Ultron — whose message
+    history has no record of ever speaking — asks what they would like done.
+    """
+
+    def test_an_unprompted_line_becomes_part_of_the_conversation(self, brain):
+        before = len(brain.messages)
+        brain.note_unprompted_line("Shall I put on some Arijit Singh, sir?")
+
+        assert len(brain.messages) == before + 1
+        assert brain.messages[-1] == {
+            "role": "assistant",
+            "content": "Shall I put on some Arijit Singh, sir?",
+        }
+
+    def test_yes_do_it_has_something_to_refer_back_to(self, brain):
+        """The shape the model actually sees: offer, then the bare answer."""
+        brain.note_unprompted_line("Shall I put on some Arijit Singh, sir?")
+        brain.messages.append({"role": "user", "content": "yes do it"})
+
+        offer, answer = brain.messages[-2], brain.messages[-1]
+        assert offer["role"] == "assistant" and "Arijit" in offer["content"]
+        assert answer["role"] == "user"
+
+    def test_it_is_searchable_afterwards(self, brain):
+        brain.note_unprompted_line("Shall I put on some Arijit Singh, sir?")
+
+        import sqlite3
+
+        with sqlite3.connect(brain.db.db_path) as conn:
+            rows = conn.execute(
+                "SELECT role, message FROM chat_history WHERE session_id = ?",
+                (brain.session_id,),
+            ).fetchall()
+        assert ("model", "Shall I put on some Arijit Singh, sir?") in rows
+
+    def test_nothing_is_recorded_for_an_empty_line(self, brain):
+        before = list(brain.messages)
+        for nothing in ("", "   ", None):
+            brain.note_unprompted_line(nothing)
+        assert brain.messages == before
+
+    def test_surrounding_whitespace_is_not_carried_into_history(self, brain):
+        brain.note_unprompted_line("  Still there, sir?\n")
+        assert brain.messages[-1]["content"] == "Still there, sir?"
+
+    def test_a_failing_log_does_not_take_down_the_idle_loop(self, brain):
+        """The line still enters the conversation even if the log write fails."""
+        def explode(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        brain.db.save_message = explode
+        brain.note_unprompted_line("Still there, sir?")  # must not raise
+
+        assert brain.messages[-1]["content"] == "Still there, sir?"
+
+    def test_the_idle_loop_actually_records_what_it_says(self):
+        """Guards the wiring, not the method — the bug was a missing call."""
+        import inspect
+
+        from ultron.core import UltronCore
+
+        source = inspect.getsource(UltronCore._idle_loop)
+        assert "note_unprompted_line" in source
+
+        # Recorded before it is queued: enqueue is what shows it on screen, so
+        # recording after would leave a window where the user can answer an
+        # offer that is not yet in the history.
+        assert source.index("note_unprompted_line") < source.index("enqueue")
+
+
+class TestUnpromptedLinesFromEverywhere:
+    """Reminders fire on their own thread, mid-turn, with no coordination.
+
+    An assistant message inserted between a tool_calls message and its results
+    is a malformed history the API rejects outright — so a line said while a
+    turn is running has to wait rather than land wherever it happens to fall.
+    """
+
+    def test_the_reminder_loop_records_what_it_announces(self):
+        import inspect
+
+        from ultron.core import UltronCore
+
+        source = inspect.getsource(UltronCore._reminder_loop)
+        assert "note_unprompted_line" in source
+        assert source.index("note_unprompted_line") < source.index("enqueue")
+
+    def test_a_routine_needs_no_wiring_because_it_is_a_real_turn(self):
+        """It runs through process_input, so its reply is already in history."""
+        import inspect
+
+        from ultron.core import UltronCore
+
+        source = inspect.getsource(UltronCore._run_routine)
+        assert "self.brain.process_input" in source
+        # Recording it again here would duplicate every routine result.
+        assert "note_unprompted_line" not in source
+
+    def test_a_line_said_mid_turn_is_held_back(self, brain):
+        brain._in_turn = True
+        brain.note_unprompted_line("Sir, here is your reminder: workout")
+
+        assert brain.messages[-1]["role"] != "assistant"
+        assert brain._pending_unprompted == ["Sir, here is your reminder: workout"]
+
+    def test_a_held_line_lands_before_the_next_thing_the_user_says(self, brain):
+        brain._in_turn = True
+        brain.note_unprompted_line("Sir, here is your reminder: workout")
+        brain._in_turn = False
+
+        brain._flush_unprompted()
+        brain.messages.append({"role": "user", "content": "snooze it"})
+
+        assert brain.messages[-2]["role"] == "assistant"
+        assert "workout" in brain.messages[-2]["content"]
+        assert brain._pending_unprompted == []
+
+    def test_several_held_lines_keep_the_order_they_were_said_in(self, brain):
+        brain._in_turn = True
+        for text in ("first", "second", "third"):
+            brain.note_unprompted_line(text)
+        brain._in_turn = False
+
+        brain._flush_unprompted()
+
+        assert [m["content"] for m in brain.messages[-3:]] == ["first", "second", "third"]
+
+    def test_process_input_flushes_before_it_appends_the_user_turn(self):
+        """Ordering is the whole point: the offer has to come first."""
+        import inspect
+
+        from ultron.brain import Brain
+
+        source = inspect.getsource(Brain.process_input)
+        assert "_flush_unprompted" in source
+        assert "_in_turn = True" in source
+        # Cleared even when the turn raises, or one failure mutes every
+        # unprompted line for the rest of the session.
+        assert "finally:" in source
+
+    def test_the_history_stays_valid_when_a_reminder_lands_during_tool_use(self, brain):
+        """The failure this guards: an assistant message orphaning tool results."""
+        brain._in_turn = True
+        brain.messages.append({"role": "assistant", "tool_calls": [{"id": "abc"}]})
+        brain.note_unprompted_line("Sir, here is your reminder: workout")
+        brain.messages.append({"role": "tool", "tool_call_id": "abc", "content": "done"})
+
+        calls = brain.messages[-2]
+        assert calls.get("tool_calls"), "the tool results must still follow their call"
+        assert brain.messages[-1]["role"] == "tool"

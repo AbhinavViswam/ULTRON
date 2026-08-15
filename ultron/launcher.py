@@ -23,6 +23,28 @@ ICON_PATH = os.path.join(PROJECT_ROOT, "resources", "ultron.ico")
 # Output
 # ---------------------------------------------------------------------------
 
+def make_output_safe():
+    """Stops a stray emoji from killing whatever tried to print it.
+
+    A real Windows console gives Python a UTF-8 stdout, but redirect it — into
+    a file, a pipe, another program — and it falls back to the locale encoding,
+    which on this machine is cp1252 and cannot represent an emoji at all. A web
+    search result containing one then raises UnicodeEncodeError from a plain
+    print, and because tool results are printed mid-turn, the whole turn dies
+    with "Error communicating with brain".
+
+    Replacing the character it cannot encode is the right trade: a "?" in the
+    log costs nothing, a lost answer costs the request.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # Not a reconfigurable text stream — already redirected by us, or
+            # something exotic. Nothing to do and nothing worth reporting.
+            pass
+
+
 def redirect_output_if_headless():
     """Sends stdout/stderr to a log file when launched without a console.
 
@@ -36,6 +58,7 @@ def redirect_output_if_headless():
     Returns the log path if redirected, otherwise None.
     """
     if sys.stdout is not None and sys.stderr is not None:
+        make_output_safe()
         return None
 
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)

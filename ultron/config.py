@@ -34,6 +34,8 @@ DEFAULT_SETTINGS_PATH = os.path.join(PROJECT_ROOT, "settings.default.json")
 KEYS_PATH = os.path.join(PROJECT_ROOT, "keys.json")
 CREDENTIALS_PATH = os.path.join(PROJECT_ROOT, "credentials.json")
 TOKEN_PATH = os.path.join(PROJECT_ROOT, "token.json")
+# Everything Ultron generates: the database, logs, research and routine logs.
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 # Fallback used when settings.default.json is missing or unreadable. Keeps the
 # assistant bootable from a bare checkout.

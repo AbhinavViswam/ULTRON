@@ -13,6 +13,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from ultron.config import config
 from ultron.core import UltronCore
+from ultron.launcher import make_output_safe
+
+# Before anything prints: piping this console into a file drops stdout to the
+# locale encoding, and one emoji in a search result would otherwise take down
+# the turn that fetched it.
+make_output_safe()
 
 stdout_lock = threading.Lock()
 

@@ -434,7 +434,7 @@ def close_application(app_name: str) -> str:
         return f"Failed to close {app_name}. Error: {e}"
 
 def search_spotify(query: str) -> str:
-    """Searches Spotify for an artist, song, or album and opens it in the desktop app.
+    """Opens Spotify's search results for an artist, song or album. Does NOT start playing anything — the results are shown and the user picks one.
     Args:
         query: The search term (e.g., 'Justin Bieber', 'lofi beats').
     """
@@ -444,7 +444,12 @@ def search_spotify(query: str) -> str:
         # Construct the official Spotify URI for searching
         command = f'start spotify:search:{query_encoded}'
         subprocess.Popen(command, shell=True)
-        return f"Successfully opened Spotify and searched for '{query}'."
+        # Spelled out, because the tool name reads like it plays something and
+        # the model filled in the rest: it was reporting "playback should begin
+        # shortly" over a search page that was sitting there doing nothing.
+        return (f"Opened Spotify's search results for '{query}'. NOTHING IS "
+                f"PLAYING — this only shows a list of results. Tell the user "
+                f"to pick one; do not say otherwise.")
     except Exception as e:
         return f"Failed to search Spotify. Error: {e}"
 

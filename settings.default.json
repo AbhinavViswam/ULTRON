@@ -10,6 +10,8 @@
   "llm_timeout_seconds": null,
   "truth_mode": false,
   "filter_local_tools": false,
+  "max_history_tokens": null,
+  "self_hearing_guard": true,
   "idle_chat": {
     "enabled": true,
     "after_minutes": 25,
