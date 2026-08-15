@@ -168,6 +168,57 @@ class SettingsPanel(QWidget):
         form.addWidget(self.startup_check)
         form.addWidget(_separator())
 
+        # --- Idle chat ----------------------------------------------------
+        form.addWidget(_section("Idle Chat"))
+        self.idle_check = QCheckBox("Speak up when nothing has happened for a while")
+        form.addWidget(self.idle_check)
+
+        idle_form = QFormLayout()
+        idle_form.setSpacing(7)
+
+        self.idle_after_spin = QSpinBox()
+        self.idle_after_spin.setRange(1, 240)
+        self.idle_after_spin.setSuffix(" min")
+        idle_form.addRow("Speak after", self.idle_after_spin)
+
+        quiet_row = QHBoxLayout()
+        self.quiet_start_spin = QSpinBox()
+        self.quiet_start_spin.setRange(0, 23)
+        self.quiet_start_spin.setSuffix(":00")
+        self.quiet_end_spin = QSpinBox()
+        self.quiet_end_spin.setRange(0, 23)
+        self.quiet_end_spin.setSuffix(":00")
+        quiet_row.addWidget(self.quiet_start_spin)
+        quiet_row.addWidget(QLabel("to"))
+        quiet_row.addWidget(self.quiet_end_spin)
+        quiet_row.addStretch(1)
+        idle_form.addRow("Stay silent", quiet_row)
+
+        self.give_up_spin = QSpinBox()
+        self.give_up_spin.setRange(0, 20)
+        # 0 is the "never stop" case, which needs saying rather than showing
+        # as a bare zero.
+        self.give_up_spin.setSpecialValueText("never give up")
+        self.give_up_spin.setSuffix(" unanswered")
+        idle_form.addRow("Stop after", self.give_up_spin)
+        form.addLayout(idle_form)
+
+        self.idle_mic_check = QCheckBox("Stay silent while the microphone is off")
+        form.addWidget(self.idle_mic_check)
+        self.idle_fullscreen_check = QCheckBox(
+            "Stay silent during games, video and screen shares"
+        )
+        form.addWidget(self.idle_fullscreen_check)
+
+        idle_hint = QLabel(
+            "Uses what it knows about you, so it can offer something relevant "
+            "rather than just asking if you are still there."
+        )
+        idle_hint.setObjectName("hint")
+        idle_hint.setWordWrap(True)
+        form.addWidget(idle_hint)
+        form.addWidget(_separator())
+
         # --- Agent monitor ----------------------------------------------
         form.addWidget(_section("Agent Monitor"))
         self.monitor_check = QCheckBox("Watch coding agents and alert me")
@@ -254,6 +305,16 @@ class SettingsPanel(QWidget):
         self.startup_check.setChecked(startup_enabled())
         self.startup_check.blockSignals(False)
 
+        self.idle_check.setChecked(bool(config.get("idle_chat.enabled", True)))
+        self.idle_after_spin.setValue(int(config.get("idle_chat.after_minutes", 25)))
+        self.quiet_start_spin.setValue(int(config.get("idle_chat.quiet_start_hour", 22)))
+        self.quiet_end_spin.setValue(int(config.get("idle_chat.quiet_end_hour", 8)))
+        self.give_up_spin.setValue(int(config.get("idle_chat.give_up_after", 0)))
+        self.idle_mic_check.setChecked(
+            bool(config.get("idle_chat.silent_when_mic_off", False)))
+        self.idle_fullscreen_check.setChecked(
+            bool(config.get("idle_chat.silent_in_fullscreen", False)))
+
         self.monitor_check.setChecked(bool(config.get("agent_monitor.enabled", True)))
         mode = config.get("agent_monitor.alert_mode", "both")
         self.alert_combo.setCurrentIndex(ALERT_MODES.index(mode) if mode in ALERT_MODES else 0)
@@ -271,6 +332,13 @@ class SettingsPanel(QWidget):
         updates["local_api_url"] = self.local_url_edit.text().strip() or "http://localhost:11434/v1"
         updates["microphone_active"] = self.mic_check.isChecked()
         updates["truth_mode"] = self.truth_check.isChecked()
+        updates["idle_chat.enabled"] = self.idle_check.isChecked()
+        updates["idle_chat.after_minutes"] = self.idle_after_spin.value()
+        updates["idle_chat.quiet_start_hour"] = self.quiet_start_spin.value()
+        updates["idle_chat.quiet_end_hour"] = self.quiet_end_spin.value()
+        updates["idle_chat.give_up_after"] = self.give_up_spin.value()
+        updates["idle_chat.silent_when_mic_off"] = self.idle_mic_check.isChecked()
+        updates["idle_chat.silent_in_fullscreen"] = self.idle_fullscreen_check.isChecked()
         updates["agent_monitor.enabled"] = self.monitor_check.isChecked()
         updates["agent_monitor.alert_mode"] = self.alert_combo.currentText()
         updates["agent_monitor.port"] = self.port_spin.value()
