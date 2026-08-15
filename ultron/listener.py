@@ -15,6 +15,24 @@ class VoiceListener:
         self.is_listening = False
         self.thread = None
         self.speech_threshold = 15.0
+        self._level_listeners = []
+
+    def on_level(self, callback):
+        """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
+
+        Reuses the RMS the voice detector already computes, so a UI can show
+        the microphone reacting without opening a second audio stream.
+        Fires on the audio thread; keep the callback cheap.
+        """
+        self._level_listeners.append(callback)
+        return callback
+
+    def _emit_level(self, level: float, is_speech: bool):
+        for callback in list(self._level_listeners):
+            try:
+                callback(level, is_speech)
+            except Exception as e:
+                print(f"[Voice Engine] level listener failed: {e}")
 
     def calibrate(self):
         """Calibrates background ambient noise for 0.8 seconds to set dynamic speech threshold."""
@@ -44,7 +62,13 @@ class VoiceListener:
             rms = float(np.sqrt(np.mean(indata.astype(float)**2)))
             
             nonlocal is_speaking, silence_start, buffer
-            
+
+            if self._level_listeners:
+                # Scale against the calibrated threshold so the reported level
+                # means the same thing in a quiet room and a noisy one.
+                reference = max(self.speech_threshold * 4.0, 200.0)
+                self._emit_level(min(1.0, rms / reference), rms > self.speech_threshold)
+
             # Compare against dynamic speech threshold
             if rms > self.speech_threshold:
                 if not is_speaking:
@@ -82,9 +106,13 @@ class VoiceListener:
                 if self.callback_func:
                     self.callback_func(text)
         except sr.UnknownValueError:
+            # Speech that could not be made out. Expected many times a minute
+            # in a noisy room, so logging each one would bury everything else.
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            # Anything else means the transcription never happened — usually
+            # the network. Without this it looks identical to saying nothing.
+            print(f"[Voice Engine] transcription failed: {e}")
 
     def start_listening(self, callback_func=None):
         if callback_func:

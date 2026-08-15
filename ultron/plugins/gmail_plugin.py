@@ -8,6 +8,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from ultron.config import CREDENTIALS_PATH, TOKEN_PATH
+
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.modify',
@@ -17,9 +19,8 @@ SCOPES = [
 def authenticate_gmail():
     """Authenticates the user using credentials.json and returns a Gmail API service instance."""
     creds = None
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    token_path = os.path.join(base_dir, 'token.json')
-    creds_path = os.path.join(base_dir, 'credentials.json')
+    token_path = TOKEN_PATH
+    creds_path = CREDENTIALS_PATH
 
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
@@ -55,6 +56,31 @@ def authenticate_gmail():
         return service
     except Exception as e:
         raise Exception(f"Failed to build Gmail service: {e}")
+
+def gmail_connection_status() -> dict:
+    """Reports Gmail setup state without triggering an auth flow.
+
+    Intended for a settings screen: `ready` means Gmail calls will work,
+    `needs_credentials` means the user must supply credentials.json first,
+    and `needs_authorization` means only the browser consent step is left.
+    """
+    if not os.path.exists(CREDENTIALS_PATH):
+        return {"state": "needs_credentials",
+                "message": "credentials.json not found. Download OAuth 2.0 Desktop App "
+                           "credentials from Google Cloud Console."}
+    if not os.path.exists(TOKEN_PATH):
+        return {"state": "needs_authorization",
+                "message": "Gmail is not connected yet. Authorize to continue."}
+    return {"state": "ready", "message": "Gmail is connected."}
+
+
+def disconnect_gmail() -> str:
+    """Revokes the local Gmail session by deleting the stored token."""
+    if os.path.exists(TOKEN_PATH):
+        os.remove(TOKEN_PATH)
+        return "Gmail disconnected."
+    return "Gmail was not connected."
+
 
 def get_unread_emails_count() -> int:
     """Fetches total unread messages count from Gmail inbox."""

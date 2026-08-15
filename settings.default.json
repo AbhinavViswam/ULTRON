@@ -1,0 +1,38 @@
+{
+  "openrouterapi": true,
+  "geminiapi": false,
+  "localapi": false,
+  "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "gemini_model": "gemini-2.5-flash",
+  "local_model": "gemma4:e2b",
+  "local_api_url": "http://localhost:11434/v1",
+  "microphone_active": true,
+  "llm_timeout_seconds": null,
+  "truth_mode": false,
+  "filter_local_tools": false,
+  "idle_chat": {
+    "enabled": true,
+    "after_minutes": 25,
+    "quiet_start_hour": 22,
+    "quiet_end_hour": 8,
+    "silent_when_mic_off": false,
+    "silent_in_fullscreen": false,
+    "give_up_after": 0
+  },
+  "cron_jobs": {
+    "unread_emails_check": {
+      "enabled": false,
+      "interval_seconds": 3600,
+      "notify_popup": false
+    }
+  },
+  "agent_monitor": {
+    "enabled": true,
+    "port": 8787,
+    "alert_mode": "both",
+    "min_run_seconds": 10,
+    "escalate_seconds": 120,
+    "alert_when_focused": true,
+    "pending_tool_seconds": 10
+  }
+}

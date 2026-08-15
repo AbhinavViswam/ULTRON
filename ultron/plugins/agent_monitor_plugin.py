@@ -39,6 +39,7 @@ import threading
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from ultron.config import config
 from ultron.plugins.notification_plugin import send_toast
 
 
@@ -90,19 +91,8 @@ def _label_from_cwd(cwd: str) -> str:
     return os.path.basename(os.path.normpath(cwd)) or cwd
 
 
-def _settings_path() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "settings.json",
-    )
-
-
 def _load_settings() -> dict:
-    try:
-        with open(_settings_path(), "r", encoding="utf-8") as f:
-            return json.load(f).get("agent_monitor", {}) or {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+    return config.get("agent_monitor", {}) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +170,8 @@ class _HookHandler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(data)
         except OSError:
+            # The client hung up before reading the reply. Routine for a local
+            # hook that fires and forgets, and nothing can be done about it.
             pass
 
     def log_message(self, *args):
@@ -249,8 +241,8 @@ class AgentMonitor:
             if self._server:
                 self._server.shutdown()
                 self._server.server_close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Agent Monitor] failed to stop the server: {e}")
         self._server = None
         return "Agent monitor stopped."
 
@@ -485,17 +477,8 @@ def agent_monitor_configure(alert_mode: str) -> str:
     if mode not in ("toast", "voice", "both"):
         return "alert_mode must be one of: toast, voice, both."
 
-    path = _settings_path()
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            settings = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        settings = {}
-
-    settings.setdefault("agent_monitor", {})["alert_mode"] = mode
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2)
+        config.set("agent_monitor.alert_mode", mode)
     except OSError as e:
         return f"Could not save the setting: {e}"
 
@@ -563,8 +546,8 @@ def detect_ide():
             for needle, friendly in IDES:
                 if needle in name:
                     return friendly
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Agent Monitor] could not identify the parent IDE: {e}")
     # Fallback only if psutil is unavailable. Note every VSCode fork sets
     # TERM_PROGRAM=vscode, so this cannot distinguish them — it is a last resort.
     if (os.environ.get("TERM_PROGRAM") or "").lower() == "vscode":
@@ -597,8 +580,8 @@ def main():
             "message": payload.get("message") or "",
         }}).encode("utf-8")
         send(body)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Agent Monitor] could not deliver the hook event: {e}")
 
 main()
 sys.exit(0)

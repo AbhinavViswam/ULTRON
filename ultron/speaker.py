@@ -3,12 +3,22 @@ import re
 import time
 import threading
 import urllib.request
+import numpy as np
 import sounddevice as sd
 
 try:
     from piper.voice import PiperVoice
 except ImportError:
     PiperVoice = None
+
+# Playback is written in slices this size so loudness can be reported often
+# enough to animate against (~46ms at 22kHz).
+LEVEL_FRAME_SAMPLES = 1024
+# RMS that counts as a full-scale level. Measured against this voice: speech
+# frames run to ~8500 peak with a ~3000 median, so this keeps loud syllables
+# just under the ceiling instead of flattening them all to 1.0.
+LEVEL_REFERENCE = 9000.0
+
 
 class VoiceSpeaker:
     """Provides human-like voice output using the offline Piper Neural TTS engine with instant audio streaming."""
@@ -17,6 +27,7 @@ class VoiceSpeaker:
         self.enabled = True
         self.speech_id = 0
         self.piper_voice = None
+        self._level_listeners = []
         
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.voices_dir = os.path.join(self.base_dir, "resources", "voices")
@@ -24,6 +35,22 @@ class VoiceSpeaker:
         
         self.onnx_path = os.path.join(self.voices_dir, f"{self.voice_name}.onnx")
         self.json_path = os.path.join(self.voices_dir, f"{self.voice_name}.onnx.json")
+
+    def on_level(self, callback):
+        """Registers callback(level) receiving 0.0-1.0 loudness while speaking.
+
+        Lets a UI animate in time with the actual voice rather than faking it.
+        Fires on the playback thread, so keep the callback cheap.
+        """
+        self._level_listeners.append(callback)
+        return callback
+
+    def _emit_level(self, level: float):
+        for callback in list(self._level_listeners):
+            try:
+                callback(level)
+            except Exception as e:
+                print(f"[Voice] level listener failed: {e}")
 
     def _clean_text_for_speech(self, text: str) -> str:
         """Strips markdown formatting, URLs, code snippets, and emojis for clean natural speech."""
@@ -96,23 +123,37 @@ class VoiceSpeaker:
             stream = sd.RawOutputStream(samplerate=self.piper_voice.config.sample_rate, channels=1, dtype='int16')
             stream.start()
             
+            # Piper yields a chunk per sentence, which is too coarse to animate
+            # against. Writing it in short slices and reporting the loudness of
+            # each gives a UI something that tracks the voice in real time,
+            # without changing what reaches the speakers.
             for audio_chunk in self.piper_voice.synthesize(clean_text):
                 if self.speech_id != my_id:
                     break
-                stream.write(audio_chunk.audio_int16_bytes)
-            
+                samples = np.frombuffer(audio_chunk.audio_int16_bytes, dtype=np.int16)
+                for start in range(0, len(samples), LEVEL_FRAME_SAMPLES):
+                    if self.speech_id != my_id:
+                        break
+                    slice_ = samples[start:start + LEVEL_FRAME_SAMPLES]
+                    stream.write(slice_.tobytes())
+                    if self._level_listeners and slice_.size:
+                        rms = float(np.sqrt(np.mean(slice_.astype(np.float32) ** 2)))
+                        self._emit_level(min(1.0, rms / LEVEL_REFERENCE))
+
+            self._emit_level(0.0)
+
             if self.speech_id != my_id:
                 stream.abort() # instantly clear buffer on interrupt
             else:
                 stream.stop()
         except Exception as e:
-            pass
+            print(f"[Voice] playback failed: {e}")
         finally:
             if stream:
                 try:
                     stream.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Voice] could not close the audio stream: {e}")
 
     def speak(self, text: str, my_id: int = None):
         """Synchronous speech execution."""

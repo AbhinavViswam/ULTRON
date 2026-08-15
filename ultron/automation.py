@@ -1,7 +1,209 @@
 import os
 import subprocess
 import ctypes
+import winreg
+from ctypes import wintypes
 from playwright.sync_api import sync_playwright
+
+# ---------------------------------------------------------------------------
+# Locating folders
+# ---------------------------------------------------------------------------
+
+# Windows lets users move these, and OneDrive's "known folder move" routinely
+# repoints Desktop, Documents and Pictures into the OneDrive tree. Building
+# them from the home directory opens an empty leftover folder instead of the
+# real one, so the actual location is read from the registry.
+_USER_SHELL_FOLDERS = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+)
+
+_KNOWN_FOLDER_KEYS = {
+    "desktop": "Desktop",
+    "documents": "Personal",
+    "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "pictures": "My Pictures",
+    "music": "My Music",
+    "videos": "My Video",
+}
+
+# Directories that are never what a person means and cost a fortune to walk.
+_SEARCH_SKIP = {
+    "windows", "program files", "program files (x86)", "programdata",
+    "$recycle.bin", "system volume information", "appdata", "node_modules",
+    "__pycache__", "venv", ".venv", ".git", "site-packages", "recovery",
+    "perflogs", ".cache", "dist", "build",
+}
+
+# Bounds on the folder hunt, so a miss cannot hang the assistant.
+_SEARCH_MAX_DEPTH = 5
+_SEARCH_MAX_DIRS = 40000
+# Wall-clock ceiling. The tool watchdog would abandon a runaway search, but
+# answering with what was found beats being cut off with nothing.
+_SEARCH_MAX_SECONDS = 5.0
+# Enough exact hits to judge whether the request was ambiguous.
+_SEARCH_ENOUGH_EXACT = 5
+
+
+# Words people attach when naming a folder out loud.
+_TRAILING_WORDS = ("folder", "folders", "directory", "dir")
+_LEADING_WORDS = ("the", "my", "a", "folder", "directory", "dir")
+
+
+def _clean_folder_name(text: str) -> str:
+    """Reduces a spoken phrase to a name: 'the ultron folder' -> 'ultron'."""
+    cleaned = (text or "").strip().strip("\"'").strip()
+    changed = True
+    while changed and cleaned:
+        changed = False
+        lowered = cleaned.lower()
+        for word in _TRAILING_WORDS:
+            if lowered.endswith(" " + word):
+                cleaned = cleaned[: -(len(word) + 1)].strip()
+                changed = True
+                break
+        lowered = cleaned.lower()
+        for word in _LEADING_WORDS:
+            if lowered.startswith(word + " "):
+                cleaned = cleaned[len(word) + 1:].strip()
+                changed = True
+                break
+
+    # "the folder" reduces to "the", which is filler, not a name. Searching
+    # every drive for it would return noise; better to have nothing and let
+    # the caller ask which folder was meant.
+    if cleaned.lower() in _LEADING_WORDS or cleaned.lower() in _TRAILING_WORDS:
+        return ""
+    return cleaned
+
+
+def _looks_like_path(text: str) -> bool:
+    """True only for something meant as a path, not a bare folder name.
+
+    A bare name must not be resolved against the working directory: launched
+    from its shortcut Ultron runs inside its own project, so 'ultron' would
+    quietly resolve to the package folder nested inside it rather than the
+    folder the user meant.
+    """
+    return bool(
+        os.path.isabs(text)
+        or text.startswith("~")
+        or "/" in text
+        or "\\" in text
+    )
+
+
+def known_folder(name: str) -> str:
+    """Returns the real path of a shell folder like 'desktop', or ''.
+
+    Deliberately duplicated in spirit by launcher.py, which resolves the same
+    idea for shortcuts; that module is imported at startup and must not pull
+    in this one's heavy dependencies.
+    """
+    key_name = _KNOWN_FOLDER_KEYS.get(name.strip().lower().rstrip("/\\"))
+    if not key_name:
+        return ""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _USER_SHELL_FOLDERS) as key:
+            value, _ = winreg.QueryValueEx(key, key_name)
+        path = os.path.expandvars(value)
+        if os.path.isdir(path):
+            return path
+    except OSError as e:
+        print(f"[Folders] could not read '{key_name}' from the registry: {e}")
+
+    fallback = os.path.join(os.path.expanduser("~"), name.capitalize())
+    return fallback if os.path.isdir(fallback) else ""
+
+
+def _search_roots():
+    """Where to hunt for a folder given only its name, nearest first."""
+    roots = [os.path.expanduser("~")]
+    for letter in "CDEFGH":
+        drive = f"{letter}:\\"
+        if os.path.isdir(drive):
+            roots.append(drive)
+    return roots
+
+
+def _prune(matches: list) -> list:
+    """Keeps the outermost matches, shallowest first.
+
+    Searching for 'ultron' hits both the project and the package folder nested
+    inside it. Offering both as a choice is noise — the enclosing one is what
+    was meant, and the other is reachable from it.
+    """
+    ordered = sorted(set(matches), key=lambda p: (p.count(os.sep), len(p)))
+    kept = []
+    for path in ordered:
+        if not any(path.lower().startswith(k.lower() + os.sep) for k in kept):
+            kept.append(path)
+    return kept
+
+
+def find_folders(name: str, limit: int = 8) -> list:
+    """Finds directories called `name`, searching the user profile then drives.
+
+    Exact name matches win outright; partial matches are only offered when
+    nothing matched exactly. Bounded by depth, directories visited and
+    wall-clock, because this runs on the thread serving the user.
+    """
+    import time
+
+    target = name.strip().strip("\"'").lower()
+    if not target:
+        return []
+
+    exact, partial = [], []
+    seen = set()
+    visited = 0
+    deadline = time.monotonic() + _SEARCH_MAX_SECONDS
+
+    for root in _search_roots():
+        stack = [(root, 0)]
+        while stack:
+            if time.monotonic() > deadline or visited > _SEARCH_MAX_DIRS:
+                stack.clear()
+                break
+
+            current, depth = stack.pop()
+            if depth > _SEARCH_MAX_DEPTH:
+                continue
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            visited += 1
+
+            for entry in entries:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+
+                lowered = entry.name.lower()
+                if lowered in _SEARCH_SKIP or lowered.startswith("$"):
+                    continue
+                # Hidden and tooling directories are never the answer unless
+                # the user named them exactly.
+                if lowered.startswith(".") and lowered != target:
+                    continue
+
+                resolved = os.path.normpath(entry.path)
+                key = resolved.lower()
+                if key not in seen:
+                    if lowered == target:
+                        seen.add(key)
+                        exact.append(resolved)
+                    elif target in lowered:
+                        seen.add(key)
+                        partial.append(resolved)
+
+                if len(exact) >= _SEARCH_ENOUGH_EXACT:
+                    return _prune(exact)[:limit]
+                stack.append((entry.path, depth + 1))
+
+    return _prune(exact or partial)[:limit]
 
 # Comprehensive list of allowed Windows desktop applications
 ALLOWED_APPS = {
@@ -101,6 +303,70 @@ APP_PROCESS_NAMES = {
     "minecraft": "Minecraft.exe"
 }
 
+# Virtual-key codes for every modifier that can be left held down, plus the
+# mouse buttons. A stuck modifier is invisible: the desktop simply starts
+# misbehaving (drag-select picks whole words, clicks multi-select, Win+V dies)
+# with nothing on screen to explain it.
+_STICKY_KEYS = {
+    "Ctrl": 0x11, "Shift": 0x10, "Alt": 0x12,
+    "LeftCtrl": 0xA2, "RightCtrl": 0xA3,
+    "LeftShift": 0xA0, "RightShift": 0xA1,
+    "LeftAlt": 0xA4, "RightAlt": 0xA5,
+    "LeftWin": 0x5B, "RightWin": 0x5C,
+}
+_KEYEVENTF_KEYUP = 0x0002
+_MOUSEEVENTF_LEFTUP = 0x0004
+_MOUSEEVENTF_RIGHTUP = 0x0010
+_MOUSEEVENTF_MIDDLEUP = 0x0040
+
+
+def keys_currently_held() -> list:
+    """Names of modifiers and mouse buttons Windows thinks are down."""
+    user32 = ctypes.windll.user32
+    held = [name for name, vk in _STICKY_KEYS.items()
+            if user32.GetAsyncKeyState(vk) & 0x8000]
+    for name, vk in (("LeftMouse", 0x01), ("RightMouse", 0x02), ("MiddleMouse", 0x04)):
+        if user32.GetAsyncKeyState(vk) & 0x8000:
+            held.append(name)
+    return held
+
+
+def release_stuck_keys() -> str:
+    """Releases any modifier key or mouse button left held down.
+
+    Automating a hotkey means pressing a modifier, pressing a key, then
+    releasing both. If anything fails in between — the target window steals
+    focus, the app is not ready — the release never happens and the key stays
+    down for every other program on the machine. This puts it right.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        held = keys_currently_held()
+
+        for vk in _STICKY_KEYS.values():
+            user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+        for flag in (_MOUSEEVENTF_LEFTUP, _MOUSEEVENTF_RIGHTUP, _MOUSEEVENTF_MIDDLEUP):
+            user32.mouse_event(flag, 0, 0, 0, 0)
+
+        if not held:
+            return "No keys were stuck; released the modifiers anyway."
+        return f"Released stuck input: {', '.join(held)}."
+    except Exception as e:
+        return f"Failed to release keys: {e}"
+
+
+def _release_quietly():
+    """Best-effort cleanup for the finally block of a keyboard automation."""
+    try:
+        user32 = ctypes.windll.user32
+        for vk in _STICKY_KEYS.values():
+            user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+    except Exception as e:
+        # Worth saying loudly: a failure here is what leaves Ctrl latched down
+        # and the desktop behaving strangely afterwards.
+        print(f"[Keys] failed to release held keys: {e}")
+
+
 def open_application(app_name: str, file_path: str = None) -> str:
     """Opens any desktop application (e.g. 'excel', 'settings', 'word', 'chrome', 'calculator').
     Args:
@@ -152,12 +418,12 @@ def close_application(app_name: str) -> str:
         
     try:
         # /F forces termination, /IM specifies image name, /T kills child processes
-        subprocess.check_output(f'taskkill /F /IM "{process_name}" /T', shell=True, stderr=subprocess.STDOUT)
+        subprocess.check_output(f'taskkill /F /IM "{process_name}" /T', shell=True, stderr=subprocess.STDOUT, timeout=20)
         return f"Successfully closed {app_name}."
     except Exception:
         # Secondary attempt with wildcards or exact string
         try:
-            subprocess.check_output(f'taskkill /F /FI "WINDOWTITLE eq *{app_name}*" /T', shell=True, stderr=subprocess.STDOUT)
+            subprocess.check_output(f'taskkill /F /FI "WINDOWTITLE eq *{app_name}*" /T', shell=True, stderr=subprocess.STDOUT, timeout=20)
             return f"Successfully closed {app_name}."
         except Exception as e:
             return f"Failed to close {app_name}. Error: {e}"
@@ -198,12 +464,12 @@ def system_media_control(action: str) -> str:
             try:
                 import time
                 # If Spotify is closed, pressing play won't do anything, so we open it first.
-                output = subprocess.check_output('tasklist /FI "IMAGENAME eq spotify.exe"', shell=True).decode()
+                output = subprocess.check_output('tasklist /FI "IMAGENAME eq spotify.exe"', shell=True, timeout=20).decode()
                 if "spotify.exe" not in output.lower():
                     open_application("spotify")
                     time.sleep(5)  # Give Spotify a few seconds to load
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Media] could not check whether Spotify is running: {e}")
                 
             ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
             ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 2, 0)
@@ -271,25 +537,31 @@ def take_screenshot(filename: str = None) -> str:
         img = ImageGrab.grab(all_screens=True)
         img.save(full_path)
         return f"Screenshot saved successfully to: {full_path}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Screen] PIL capture failed, trying PyAutoGUI: {e}")
 
     # Second attempt: PyAutoGUI
     try:
         import pyautogui
         pyautogui.screenshot(full_path)
         return f"Screenshot saved successfully to: {full_path}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Screen] PyAutoGUI capture failed, trying PowerShell: {e}")
 
     # Third attempt: Native Windows PowerShell System.Drawing capture
     try:
         ps_cmd = f'powershell -command "Add-Type -AssemblyName System.Drawing, System.Windows.Forms; $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); $bmp.Save(\'{full_path}\')"'
-        subprocess.run(ps_cmd, shell=True, check=True)
+        subprocess.run(ps_cmd, shell=True, check=True, timeout=60)
         if os.path.exists(full_path):
             return f"Screenshot saved successfully to: {full_path}"
     except Exception as e:
         return f"Failed to take screenshot: {e}"
+
+# Playwright defaults to 30s per action and no cap on some waits. These are
+# what a person will sit through before deciding the assistant is broken.
+BROWSER_ACTION_TIMEOUT_MS = 15_000
+BROWSER_NAV_TIMEOUT_MS = 30_000
+
 
 class BrowserManager:
     """Manages a persistent Playwright browser session."""
@@ -330,6 +602,13 @@ class BrowserManager:
                 self.page = self.browser.pages[0]
             else:
                 self.page = self.browser.new_page()
+
+            # Playwright's own timeouts, because its sync API is bound to the
+            # thread that created it and so cannot be wrapped in a watchdog
+            # thread like the other tools. A page that never finishes loading
+            # would otherwise hold Ultron's single worker indefinitely.
+            self.browser.set_default_timeout(BROWSER_ACTION_TIMEOUT_MS)
+            self.browser.set_default_navigation_timeout(BROWSER_NAV_TIMEOUT_MS)
 
     def navigate(self, query_or_url: str) -> str:
         """Navigates the browser to a URL or a Google search."""
@@ -616,6 +895,10 @@ def write_in_notepad(text: str, filename: str = None) -> str:
         return "Successfully typed text into Notepad."
     except Exception as e:
         return f"Failed to write in Notepad: {e}"
+    finally:
+        # A hotkey that failed between press and release would leave Ctrl down
+        # across the whole desktop.
+        _release_quietly()
 
 def send_whatsapp_message(contact_name: str, message: str) -> str:
     """Opens WhatsApp Desktop, searches for contact_name, types the message, and sends it.
@@ -652,6 +935,8 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         return f"Successfully sent WhatsApp message to '{contact_name}': '{message}'"
     except Exception as e:
         return f"Failed to send WhatsApp message: {e}"
+    finally:
+        _release_quietly()
 
 def read_clipboard() -> str:
     """Reads and returns text currently copied to the Windows Clipboard."""
@@ -683,14 +968,12 @@ def find_files(search_query: str, location: str = 'Desktop') -> str:
         location: 'Desktop', 'Downloads', or 'Documents'.
     """
     try:
-        user_home = os.path.expanduser("~")
-        loc_map = {
-            'desktop': os.path.join(user_home, 'Desktop'),
-            'downloads': os.path.join(user_home, 'Downloads'),
-            'documents': os.path.join(user_home, 'Documents')
-        }
-        target_dir = loc_map.get(location.lower(), os.path.join(user_home, 'Desktop'))
-        
+        # Resolved through the registry so a OneDrive-redirected Desktop or
+        # Documents is searched, not an empty leftover folder.
+        target_dir = known_folder(location) or known_folder("desktop")
+        if not target_dir:
+            return f"Could not locate the {location} folder on this computer."
+
         matches = []
         for root, _, files in os.walk(target_dir):
             for file in files:
@@ -725,9 +1008,9 @@ def read_file_content(file_path: str) -> str:
         return f"Failed to read file content: {e}"
 
 def system_power_control(action: str) -> str:
-    """Performs system power actions: lock, sleep, or shutdown.
+    """Performs system power actions: lock, sleep, shutdown, or cancel_shutdown.
     Args:
-        action: 'lock', 'sleep', or 'shutdown'
+        action: 'lock', 'sleep', 'shutdown', or 'cancel_shutdown'
     """
     action = action.lower().strip()
     try:
@@ -748,14 +1031,8 @@ def system_power_control(action: str) -> str:
     except Exception as e:
         return f"Failed power action: {e}"
 
-def empty_recycle_bin(confirmed: bool = False) -> str:
-    """Empties the Windows Recycle Bin completely.
-    Args:
-        confirmed: Set to True ONLY if the user has explicitly confirmed (e.g., said 'yes', 'confirm', or 'proceed').
-    """
-    if not confirmed:
-        return "CONFIRMATION REQUIRED: Please ask the user for explicit confirmation before emptying the Recycle Bin."
-
+def empty_recycle_bin() -> str:
+    """Permanently empties the Windows Recycle Bin. This cannot be undone."""
     try:
         # SHERB_NOCONFIRMATION (0x1) | SHERB_NOPROGRESSUI (0x2) | SHERB_NOSOUND (0x4)
         flags = 0x1 | 0x2 | 0x4
@@ -774,6 +1051,11 @@ def clean_temp_files() -> str:
         temp_dir = tempfile.gettempdir()
         deleted_count = 0
         freed_bytes = 0
+        # Files in use by another program cannot be removed, and there are
+        # normally hundreds of them. Counting rather than printing each keeps
+        # the count honest without burying the rest of the log.
+        skipped = 0
+        last_reason = ""
         for root, dirs, files in os.walk(temp_dir):
             for file in files:
                 file_path = os.path.join(root, file)
@@ -782,10 +1064,15 @@ def clean_temp_files() -> str:
                     os.remove(file_path)
                     deleted_count += 1
                     freed_bytes += size
-                except Exception:
-                    pass
+                except Exception as e:
+                    skipped += 1
+                    last_reason = str(e)
+        if skipped:
+            print(f"[Temp] skipped {skipped} file(s) still in use; last: {last_reason}")
         freed_mb = round(freed_bytes / (1024 * 1024), 2)
-        return f"Temporary files cleaned, sir. Removed {deleted_count} files ({freed_mb} MB freed)."
+        note = f" {skipped} were in use and left alone." if skipped else ""
+        return (f"Temporary files cleaned, sir. Removed {deleted_count} files "
+                f"({freed_mb} MB freed).{note}")
     except Exception as e:
         return f"Failed to clean temp files: {e}"
 
@@ -805,20 +1092,70 @@ def create_file(file_path: str, content: str = "") -> str:
     except Exception as e:
         return f"Failed to create file: {e}"
 
-def delete_file(file_path: str, confirmed: bool = False) -> str:
-    """Deletes a file from the disk safely.
-    Args:
-        file_path: Path to the file to be deleted.
-        confirmed: Set to True ONLY if the user has explicitly confirmed deletion (e.g., said 'yes', 'confirm', or 'proceed').
-    """
-    if not confirmed:
-        return f"CONFIRMATION REQUIRED: Please ask the user for explicit confirmation before deleting '{file_path}'."
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("wFunc", wintypes.UINT),
+        ("pFrom", wintypes.LPCWSTR),
+        ("pTo", wintypes.LPCWSTR),
+        ("fFlags", ctypes.c_uint16),
+        ("fAnyOperationsAborted", wintypes.BOOL),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", wintypes.LPCWSTR),
+    ]
 
+
+_FO_DELETE = 0x0003
+# ALLOWUNDO is the whole point: it routes through the Recycle Bin instead of
+# unlinking. The rest suppress Explorer's own dialogs, which would otherwise
+# block a background thread waiting for a click nobody can see.
+_FOF_SILENT = 0x0004
+_FOF_NOCONFIRMATION = 0x0010
+_FOF_ALLOWUNDO = 0x0040
+_FOF_NOERRORUI = 0x0400
+
+
+def recycle_path(path: str) -> str:
+    """Moves a file or folder to the Recycle Bin. Returns '' on success.
+
+    Deleting outright is unrecoverable, and an assistant acting on a misheard
+    filename is exactly the case where recovery matters. The Recycle Bin turns
+    a mistake into an inconvenience.
+    """
+    absolute = os.path.abspath(path)
+    if not os.path.exists(absolute):
+        return f"does not exist: '{path}'"
+
+    operation = _SHFILEOPSTRUCTW()
+    operation.wFunc = _FO_DELETE
+    # The API takes a double-null-terminated list, not a plain string.
+    operation.pFrom = absolute + "\0\0"
+    operation.fFlags = (
+        _FOF_ALLOWUNDO | _FOF_NOCONFIRMATION | _FOF_SILENT | _FOF_NOERRORUI
+    )
+
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result != 0:
+        return f"Windows refused the operation (code {result})"
+    if operation.fAnyOperationsAborted:
+        return "the operation was aborted"
+    return ""
+
+
+def delete_file(file_path: str) -> str:
+    """Moves a file to the Recycle Bin, where it can still be restored.
+
+    Args:
+        file_path: Path to the file to remove.
+    """
     try:
         if not os.path.exists(file_path):
             return f"File does not exist: '{file_path}'"
-        os.remove(file_path)
-        return f"Successfully deleted file '{file_path}', sir."
+        problem = recycle_path(file_path)
+        if problem:
+            return f"Failed to delete file: {problem}"
+        return (f"Moved '{file_path}' to the Recycle Bin, sir. "
+                "It can be restored from there if that was a mistake.")
     except Exception as e:
         return f"Failed to delete file: {e}"
 
@@ -856,26 +1193,56 @@ def list_directory(path: str = ".") -> str:
         return f"Failed to list directory: {e}"
 
 def open_folder(path: str) -> str:
-    """Opens a folder in the native Windows File Explorer.
+    """Opens a folder in Windows File Explorer.
+
+    Accepts a full path ('C:/projects/ultron'), a shell folder name
+    ('Downloads', 'Desktop', 'Documents', 'Pictures', 'Music', 'Videos'), or
+    just the folder's name ('ultron') — an unknown name is searched for on the
+    user's drives, so you do NOT need to ask the user for a full path first.
+
     Args:
-        path: Path to the folder (e.g., 'Downloads', 'Desktop', or 'C:/path/to/folder').
+        path: Folder path, shell folder name, or plain folder name.
     """
     try:
-        user_home = os.path.expanduser("~")
-        if path.lower() in ['desktop', 'desktop/']:
-            target_path = os.path.join(user_home, 'Desktop')
-        elif path.lower() in ['downloads', 'downloads/']:
-            target_path = os.path.join(user_home, 'Downloads')
-        elif path.lower() in ['documents', 'documents/']:
-            target_path = os.path.join(user_home, 'Documents')
-        else:
-            target_path = path
+        query = (path or "").strip().strip("\"'")
+        if not query:
+            return "No folder was given."
 
-        if not os.path.exists(target_path):
-            return f"Folder does not exist: '{target_path}'"
+        missed_path = ""
+        if _looks_like_path(query):
+            expanded = os.path.expanduser(os.path.expandvars(query))
+            if os.path.isdir(expanded):
+                resolved = os.path.abspath(expanded)
+                os.startfile(resolved)
+                return f"Successfully opened folder: '{resolved}'"
+            # Fall through and search on the final component, but remember
+            # that what opens is not what was asked for.
+            missed_path = query
+            query = os.path.basename(os.path.normpath(expanded)) or query
 
-        os.startfile(target_path)
-        return f"Successfully opened folder: '{target_path}'"
+        name = _clean_folder_name(query)
+
+        shell_folder = known_folder(name)
+        if shell_folder:
+            os.startfile(shell_folder)
+            return f"Successfully opened folder: '{shell_folder}'"
+
+        # Treat it as a name and go looking, rather than bouncing the question
+        # back to the user.
+        matches = find_folders(name)
+        if not matches:
+            return (f"No folder named '{name}' was found on this computer. "
+                    f"Ask the user for the full path.")
+
+        if len(matches) == 1:
+            os.startfile(matches[0])
+            if missed_path:
+                return (f"'{missed_path}' does not exist. Opened the closest "
+                        f"match instead: '{matches[0]}'. Tell the user this.")
+            return f"Successfully opened folder: '{matches[0]}'"
+
+        listed = "\n".join(f"- {m}" for m in matches)
+        return (f"Several folders match '{name}'. Ask the user which one:\n{listed}")
     except Exception as e:
         return f"Failed to open folder: {e}"
 

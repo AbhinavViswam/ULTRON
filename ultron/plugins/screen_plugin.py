@@ -92,6 +92,9 @@ def _walk(control, elements: list, depth: int, max_depth: int,
                         ))
                         seen_texts.add(dedup_key)
                 except Exception:
+                    # Silent by design: a control that repaints mid-walk throws
+                    # here routinely, and one line per control would bury the
+                    # log under a single screen read.
                     pass
 
         # Only try ValuePattern on control types that actually use it
@@ -111,10 +114,12 @@ def _walk(control, elements: list, depth: int, max_depth: int,
                         ))
                         seen_texts.add(val_key)
             except Exception:
-                pass
+                pass  # as above — expected while the UI is live
 
-    except Exception:
-        pass  # some controls throw on property access mid-refresh
+    except Exception as e:
+        # The whole control was unreadable, not just one property — rarer, and
+        # worth knowing about when a screen read comes back oddly empty.
+        print(f"[Screen] skipped an unreadable control: {e}")
 
     # Walk children — use GetFirstChildControl/GetNextSiblingControl 
     # instead of GetChildren() to avoid loading entire child list at once
@@ -124,10 +129,11 @@ def _walk(control, elements: list, depth: int, max_depth: int,
             _walk(child, elements, depth + 1, max_depth, max_elements, seen_texts, deadline)
             try:
                 child = child.GetNextSiblingControl()
-            except Exception:
+            except Exception as e:
+                print(f"[Screen] stopped walking siblings early: {e}")
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Screen] could not walk the control's children: {e}")
 
 
 def _read_foreground(max_depth: int = 8, max_elements: int = 150,
@@ -192,8 +198,8 @@ def _read_by_title(title_substring: str, max_depth: int = 8,
                 try:
                     import ctypes
                     ctypes.windll.ole32.CoUninitialize()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Screen] CoUninitialize failed: {e}")
 
     def _walk_window():
         # First try exact match
@@ -211,10 +217,11 @@ def _read_by_title(title_substring: str, max_depth: int = 8,
                         return
                     try:
                         child = child.GetNextSiblingControl()
-                    except Exception:
+                    except Exception as e:
+                        print(f"[Screen] stopped scanning windows early: {e}")
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Screen] could not scan top-level windows: {e}")
             return  # Not found
 
         found_flag[0] = True

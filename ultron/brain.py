@@ -2,10 +2,13 @@ import os
 import re
 import uuid
 import datetime
+import functools
 import inspect
 import json
+import threading
 from openai import OpenAI
 
+from ultron.config import config, PROVIDER_KEYS
 from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
@@ -13,9 +16,12 @@ from ultron.automation import (
     get_system_health, write_in_notepad, send_whatsapp_message,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
-    copy_file, move_file
+    copy_file, move_file, release_stuck_keys
 )
-from ultron.plugins.explorer_plugin import get_selected_file_in_explorer
+from ultron.plugins.explorer_plugin import (
+    get_selected_file_in_explorer, get_current_explorer_folder,
+    list_current_explorer_folder
+)
 from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
 from ultron.plugins.docker_plugin import (
     docker_list_containers, docker_list_images, docker_start_container,
@@ -49,6 +55,125 @@ _TIME_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Tools that can destroy something, and how to describe the act to a person.
+# Each entry returns the sentence a human is asked to approve, or None when
+# the particular arguments are harmless.
+#
+# The point of enforcing this here rather than in the system prompt is that a
+# prompt instruction is a request, and the model is free to ignore it. A small
+# local model that invents arguments — as ours demonstrably does — must not be
+# the only thing standing between a misheard sentence and a wiped folder.
+def _describe_delete_file(args):
+    return f"move '{args.get('file_path', '?')}' to the Recycle Bin"
+
+
+def _describe_power(args):
+    action = str(args.get("action", "")).lower().strip()
+    if action in ("shutdown", "poweroff"):
+        return "shut down this PC in 30 seconds"
+    if action in ("sleep", "sleep_pc", "suspend"):
+        return "put this PC to sleep"
+    # Locking and cancelling a shutdown are trivially reversible.
+    return None
+
+
+DESTRUCTIVE_TOOLS = {
+    "delete_file": _describe_delete_file,
+    "empty_recycle_bin": lambda args: (
+        "permanently empty the Recycle Bin — this cannot be undone"
+    ),
+    "clean_temp_files": lambda args: (
+        "permanently delete everything in the Windows temp folder"
+    ),
+    "system_power_control": _describe_power,
+    "delete_reminder": lambda args: f"delete reminder {args.get('task_id', '?')}",
+    "delete_memory": lambda args: (
+        f"forget the memory matching '{args.get('which', '?')}'"
+    ),
+    "delete_workflow": lambda args: f"delete the workflow '{args.get('name', '?')}'",
+}
+
+
+# --- Tool watchdog -----------------------------------------------------------
+
+# Ultron runs every command on one worker thread, so a tool that never returns
+# is not a slow tool — it is a dead assistant. These budgets are what a person
+# will wait before concluding it has hung.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30
+
+TOOL_TIMEOUT_SECONDS = {
+    # Drives other apps through the keyboard, at human speed.
+    "write_in_notepad": 180,
+    "send_whatsapp_message": 180,
+    # Walks the filesystem.
+    "find_files": 60,
+    # Resolves a spoken folder name by searching the drives.
+    "open_folder": 60,
+    "clean_temp_files": 300,
+    "empty_recycle_bin": 120,
+    # Network round trips to Google.
+    "read_emails": 90,
+    "send_email": 90,
+    "draft_email": 90,
+    # Runs many other tools back to back, each with its own settling delay.
+    "run_workflow": 900,
+    # Image capture plus OCR.
+    "screen_read_ocr": 90,
+    "screen_capture": 60,
+    # Docker talks to a daemon that may be starting up.
+    "docker_start_daemon": 180,
+}
+
+# Tools that must run on the calling thread. Playwright's sync API is bound to
+# the thread that created it, so moving a browser call onto a watchdog thread
+# breaks it outright. These carry their own timeouts instead — see
+# BROWSER_ACTION_TIMEOUT_MS in automation.py.
+UNWATCHED_TOOL_PREFIXES = ("browser_",)
+
+
+def tool_timeout(tool_name: str):
+    """How long a tool may run, or None if it must not be watched."""
+    if tool_name.startswith(UNWATCHED_TOOL_PREFIXES):
+        return None
+    return TOOL_TIMEOUT_SECONDS.get(tool_name, DEFAULT_TOOL_TIMEOUT_SECONDS)
+
+
+def confirmation_question(tool_name: str, args: dict):
+    """Returns the sentence a human must approve, or None if no gate applies."""
+    describe = DESTRUCTIVE_TOOLS.get(tool_name)
+    if describe is None:
+        return None
+    try:
+        return describe(args or {})
+    except Exception:
+        # A malformed call to a destructive tool is the last thing to wave
+        # through, so fall back to asking rather than skipping the gate.
+        return f"run {tool_name}"
+
+
+_FREQUENCIES = ("hourly", "daily", "weekly", "monthly")
+
+# Models rarely emit the bare adverb, so the phrasings they do reach for are
+# mapped rather than rejected.
+_FREQUENCY_ALIASES = {
+    "every day": "daily", "day": "daily", "everyday": "daily", "days": "daily",
+    "every hour": "hourly", "hour": "hourly", "hours": "hourly",
+    "every week": "weekly", "week": "weekly", "weeks": "weekly",
+    "every month": "monthly", "month": "monthly", "months": "monthly",
+}
+
+
+def normalise_frequency(frequency: str):
+    """Maps a spoken recurrence onto a supported one, or None if unsupported.
+
+    Rejecting outright matters: an unrecognised frequency reaching the
+    scheduler would silently repeat on the wrong cadence rather than telling
+    anyone the request was not understood.
+    """
+    freq = (frequency or "daily").strip().lower().rstrip("(),.")
+    freq = _FREQUENCY_ALIASES.get(freq, freq)
+    return freq if freq in _FREQUENCIES else None
+
 
 def parse_time_string(time_str: str, now: datetime.datetime = None) -> datetime.datetime:
     """Parses a natural clock time into a concrete future datetime.
@@ -71,6 +196,8 @@ def parse_time_string(time_str: str, now: datetime.datetime = None) -> datetime.
     try:
         return datetime.datetime.fromisoformat(text.replace("z", ""))
     except ValueError:
+        # Not an ISO timestamp — that is the normal case for spoken input, and
+        # the patterns below handle it. Nothing has failed yet.
         pass
 
     # 2. Pull an explicit date off the front if one is present.
@@ -138,8 +265,12 @@ TOOL_GROUPS: dict[str, list[str]] = {
     # Always included — memory and reminders are needed for any conversation
     "core": [
         "save_memory", "search_memories", "search_past_conversations",
+        "list_memories", "delete_memory",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+        # Always reachable: if a modifier is stuck the user cannot type
+        # comfortably, so asking by voice must work whatever else is loaded.
+        "release_stuck_keys",
     ],
     # Desktop app control + media + volume
     "system": [
@@ -166,6 +297,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "copy_file", "move_file", "list_directory", "open_folder",
         "read_clipboard", "copy_to_clipboard", "write_in_notepad",
         "read_document", "get_selected_file_in_explorer",
+        "get_current_explorer_folder", "list_current_explorer_folder",
     ],
     # System health, power, disk cleanup
     "system_health": [
@@ -356,76 +488,89 @@ class ToolBridge:
 
 
 class Brain:
+    # Base URLs per provider. The local provider's URL is configurable.
+    PROVIDER_BASE_URLS = {
+        "openrouterapi": "https://openrouter.ai/api/v1",
+        "geminiapi": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    }
+
+    PROVIDER_LABELS = {
+        "openrouterapi": "OpenRouter",
+        "geminiapi": "Gemini",
+        "localapi": "Local",
+    }
+
+    @property
+    def truth_mode(self) -> bool:
+        """Read live so toggling it in settings takes effect immediately."""
+        return bool(config.get("truth_mode", False))
+
+    def _configure_provider(self, verbose: bool = True):
+        """Builds the OpenAI-compatible client for the active provider.
+
+        Called at startup and again on any config change, so switching
+        provider or model does not require a restart.
+        """
+        provider = config.active_provider()
+        model = config.model_for(provider)
+
+        # Without this the SDK waits 10 minutes before giving up, and Ultron
+        # has one worker thread — so a stalled request is a total freeze, not
+        # a slow answer. Local models run on the CPU and are legitimately
+        # slow, so they get a longer leash than a hosted API.
+        default_timeout = 240 if provider == "localapi" else 90
+        # `or` rather than a get() default: the setting ships as null, meaning
+        # "use the per-provider default", and 0 would be nonsense anyway.
+        timeout = float(config.get("llm_timeout_seconds") or default_timeout)
+
+        if provider == "localapi":
+            client = OpenAI(
+                base_url=config.get("local_api_url", "http://localhost:11434/v1"),
+                api_key="ollama",
+                timeout=timeout,
+                max_retries=1,
+            )
+        elif provider in self.PROVIDER_BASE_URLS:
+            key_name = PROVIDER_KEYS[provider]
+            api_key = config.get_key(key_name)
+            if not api_key:
+                raise ValueError(f"{key_name} API key is not set correctly in keys.json.")
+            client = OpenAI(
+                base_url=self.PROVIDER_BASE_URLS[provider],
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=1,
+            )
+        else:
+            raise ValueError(f"Unsupported API selected in settings: {provider}")
+
+        changed = getattr(self, "active_api", None) != provider or getattr(self, "selected_model", None) != model
+        self.active_api = provider
+        self.selected_model = model
+        self.client = client
+
+        if verbose or changed:
+            print(f"\nUltron AI Provider: {self.PROVIDER_LABELS[provider]} Mode")
+            print(f"Selected Model: {self.selected_model}")
+
     def __init__(self):
         self.session_id = str(uuid.uuid4())
-        
-                
-        # Load Settings
-        settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
-        try:
-            with open(settings_path, "r") as f:
-                settings = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            settings = {"openrouterapi": True, "geminiapi": False}
-            
-        # Load API Keys
-        keys_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "keys.json")
-        try:
-            with open(keys_path, "r") as f:
-                api_keys = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            api_keys = {}
-            
-        # Select the first API set to true
-        active_api = None
-        for api_name in ["openrouterapi", "geminiapi", "localapi"]:
-            if settings.get(api_name) is True:
-                active_api = api_name
-                break
-                
-        if not active_api:
-            active_api = "openrouterapi"
-            
-        self.active_api = active_api
+        self._tool_listeners = []
+        # Set by whichever front end can actually ask the user a question.
+        # Until then, destructive tools have nobody to ask and are refused.
+        self.confirm_handler = None
+        # Ids from the last list_memories, so "forget number 3" means the
+        # third thing the user was actually shown.
+        self._memory_listing = []
+
         self.db = Database()
         self.browser = BrowserManager()
-        self.truth_mode = settings.get("truth_mode", False)
-        
-        if active_api == "openrouterapi":
-            api_key = api_keys.get("openrouter")
-            if not api_key:
-                raise ValueError("openrouter API key is not set correctly in keys.json.")
-                
-            self.client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=api_key,
-            )
-            self.selected_model = settings.get("openrouter_model") or settings.get("model") or "nvidia/nemotron-3-ultra-550b-a55b:free"
-            print("\nUltron AI Provider: OpenRouter Mode")
-            
-        elif active_api == "geminiapi":
-            api_key = api_keys.get("google")
-            if not api_key:
-                raise ValueError("google API key is not set correctly in keys.json.")
-                
-            self.client = OpenAI(
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=api_key,
-            )
-            self.selected_model = settings.get("gemini_model") or settings.get("model") or "gemini-2.5-flash"
-            print("\nUltron AI Provider: Gemini Mode")
-        elif active_api == "localapi":
-            self.client = OpenAI(
-                base_url=settings.get("local_api_url", "http://localhost:11434/v1"),
-                api_key="ollama",
-            )
-            self.selected_model = settings.get("local_model") or settings.get("model") or "gemma4:e2b"
-            print("\nUltron AI Provider: Local Mode")
-        else:
-            raise ValueError(f"Unsupported API selected in settings: {active_api}")
-            
-        print(f"Selected Model: {self.selected_model}")
-        
+
+        # Build the LLM client from settings, and rebuild it whenever the
+        # provider, model, or API keys change on disk or via the UI.
+        self._configure_provider()
+        config.on_change(lambda _cfg: self._configure_provider(verbose=False))
+
         # Define memory tools
         def save_memory(category: str, key: str, value: str, importance: int) -> str:
             """Saves a memory for the user. Call this when the user asks you to remember something."""
@@ -442,9 +587,13 @@ class Brain:
         def set_recurring_reminder(description: str, start_delay_seconds: int, frequency: str, until_date_iso: str = None) -> str:
             """Sets a recurring reminder. frequency must be 'hourly', 'daily', 'weekly', or 'monthly'."""
             import datetime
+            freq = normalise_frequency(frequency)
+            if freq is None:
+                return (f"Error: frequency '{frequency}' is not supported. "
+                        "Use hourly, daily, weekly, or monthly.")
             scheduled_for = (datetime.datetime.now() + datetime.timedelta(seconds=start_delay_seconds)).isoformat()
-            self.db.add_task(description, scheduled_for, frequency, until_date_iso)
-            return f"Recurring reminder '{frequency}' successfully set to trigger first in {start_delay_seconds} seconds."
+            self.db.add_task(description, scheduled_for, freq, until_date_iso)
+            return f"Recurring reminder '{freq}' successfully set to trigger first in {start_delay_seconds} seconds."
 
         def set_reminder_at(description: str, time_str: str) -> str:
             """Sets a one-time reminder at a clock time, e.g. '10:20 am', '17:30', 'tomorrow 9am'. Use this whenever the user gives a time of day rather than a delay."""
@@ -457,15 +606,8 @@ class Brain:
 
         def set_recurring_reminder_at(description: str, time_str: str, frequency: str, until_date_iso: str = None) -> str:
             """Sets a repeating reminder at a clock time, e.g. '10:20 am' daily. frequency must be 'hourly', 'daily', 'weekly', or 'monthly'. Use this for requests like 'remind me every day at 10:20 am'."""
-            freq = (frequency or "daily").strip().lower().rstrip("(),.")
-            aliases = {
-                "every day": "daily", "day": "daily", "everyday": "daily",
-                "every hour": "hourly", "hour": "hourly",
-                "every week": "weekly", "week": "weekly",
-                "every month": "monthly", "month": "monthly",
-            }
-            freq = aliases.get(freq, freq)
-            if freq not in ("hourly", "daily", "weekly", "monthly"):
+            freq = normalise_frequency(frequency)
+            if freq is None:
                 return f"Error: frequency '{frequency}' is not supported. Use hourly, daily, weekly, or monthly."
             try:
                 scheduled = parse_time_string(time_str)
@@ -495,6 +637,58 @@ class Brain:
                 freq_str = f" (repeats {frequency})" if frequency else ""
                 lines.append(f"- [{task_id}] \"{desc}\" - scheduled for {scheduled_for}{freq_str}")
             return f"Pending reminders ({len(tasks)}):\n" + "\n".join(lines)
+        def list_memories() -> str:
+            """Lists everything Ultron has remembered about the user, numbered.
+
+            Use this whenever the user asks what you know or remember about
+            them, or what is in your memory. Call it before delete_memory so
+            the numbers you quote are the ones they can refer back to.
+            """
+            memories = self.db.list_memories()
+            if not memories:
+                return "I have not saved anything about you yet, sir."
+
+            # The numbers shown here are what the user will say back, so the
+            # order they were listed in has to survive until they answer.
+            self._memory_listing = [m["id"] for m in memories]
+
+            lines = []
+            for number, memory in enumerate(memories, 1):
+                category = f"[{memory['category']}] " if memory["category"] else ""
+                when = ""
+                if memory["saved_at"]:
+                    # Stored to the microsecond for ordering; nobody wants to
+                    # read that.
+                    try:
+                        stamp = datetime.datetime.fromisoformat(memory["saved_at"])
+                        when = f" — saved {stamp:%Y-%m-%d %H:%M}"
+                    except ValueError:
+                        when = f" — saved {memory['saved_at']}"
+                lines.append(
+                    f"{number}. {category}{memory['key']}: {memory['value']} "
+                    f"(importance {memory['importance']}){when}"
+                )
+            return (f"I remember {len(memories)} thing(s) about you, sir:\n"
+                    + "\n".join(lines)
+                    + "\nSay the number or describe one to have it forgotten.")
+
+        def delete_memory(which: str) -> str:
+            """Forgets one saved memory, by its number from list_memories or by describing it.
+
+            Args:
+                which: A number from the last listing ("3"), or words matching
+                    the memory ("favourite animal").
+            """
+            memory, problem = self._resolve_memory(which)
+            if problem:
+                return problem
+            if self.db.delete_memory(memory["id"]):
+                # The numbers just shifted, so do not let stale ones be reused.
+                self._memory_listing = []
+                return (f"Forgotten, sir: {memory['key']}: {memory['value']}. "
+                        "That is gone for good.")
+            return f"Error: I could not remove '{memory['key']}'. It may already be gone."
+
         def search_memories(query: str) -> str:
             """Searches for relevant memories. Call this when you need to recall a fact about the user."""
             results = self.db.search_memories(query)
@@ -581,13 +775,18 @@ class Brain:
             Args:
                 name: The name of the workflow to run.
             """
-            return run_workflow(name, tool_functions=self.tool_functions)
+            # Routed through _invoke_tool rather than handing over the raw
+            # functions: a saved workflow is still a tool call, and must not
+            # be a way around the confirmation gate.
+            return run_workflow(name, tool_functions=self._gated_tools())
 
         # Register all tools in a dictionary
         self.tool_functions = {
             # ── Memory & Reminders ─────────────────────────────────────────
             "save_memory": save_memory,
             "search_memories": search_memories,
+            "list_memories": list_memories,
+            "delete_memory": delete_memory,
             "search_past_conversations": search_past_conversations,
             "set_reminder": set_reminder,
             "set_reminder_at": set_reminder_at,
@@ -638,9 +837,12 @@ class Brain:
             "delete_file": delete_file,
             "copy_file": copy_file,
             "move_file": move_file,
+            "release_stuck_keys": release_stuck_keys,
             "list_directory": list_directory,
             "open_folder": open_folder,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
+            "get_current_explorer_folder": get_current_explorer_folder,
+            "list_current_explorer_folder": list_current_explorer_folder,
             "read_document": read_document,
             # ── Communication ─────────────────────────────────────────────
             "send_whatsapp_message": send_whatsapp_message,
@@ -763,10 +965,12 @@ Examples of autonomous behaviour:
 - FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files (ALWAYS prefer this for saving text — it's fast and reliable), `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
 - WRITING TEXT: To save text to a file silently, use `create_file`. Only use `write_in_notepad` when the user explicitly wants to SEE Notepad open with the text visible on screen.
 - SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
+- CURRENT FOLDER: If the user says "this folder", "here", "the folder I am in", or "the current folder", use `get_current_explorer_folder` to find out exactly where they are looking, or `list_current_explorer_folder` to see what is in it. Never guess a path when these can tell you.
 - READING DOCUMENTS: Use `read_document` to read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP). For images, it extracts text using OCR. If a PDF/DOCX is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
 - RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
-- DELETION CONFIRMATION (CRITICAL): For destructive actions (`delete_file` or `empty_recycle_bin`), ALWAYS ask the user for explicit confirmation (e.g., "Are you sure you want to delete <file>, sir?") before proceeding. Call `delete_file` or `empty_recycle_bin` with `confirmed=True` ONLY when the user explicitly confirms (e.g. says "yes", "confirm", or "proceed").
-- POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, or schedule system shutdown.
+- DESTRUCTIVE ACTIONS: Ultron itself asks the user to approve anything destructive (`delete_file`, `empty_recycle_bin`, `clean_temp_files`, shutting down, deleting reminders or workflows) — you do not need a confirmation argument, and you cannot approve on the user's behalf. Call the tool when the user asks for it; a prompt appears and the tool runs only if they agree. If the result says the user did not approve, tell them plainly that nothing was changed and do not try again.
+- `delete_file` moves the file to the Recycle Bin, so it can be restored. Say so when you report it. `empty_recycle_bin` is permanent.
+- POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, schedule system shutdown, or cancel a scheduled shutdown.
 - GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
 - DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images.
 - QUICK WEB SEARCH: For quick facts, current events, or real-time data, use `web_search` to query the internet and answer the user directly. If the search fails (e.g., no internet), fall back to answering from your training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST tell the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data. If you need more details from a specific page, use `research_read_url`.
@@ -1005,7 +1209,7 @@ Your response: Let me find some great Malayalam songs for you, sir.
 - You can call multiple tools by including multiple <tool_call> blocks.
 - After a tool runs, you will receive its result in a message. Use the result to answer the user.
 - If no tool is needed (e.g., general chat or a question), just respond normally WITHOUT any <tool_call> block.
-- For destructive actions (delete_file, empty_recycle_bin), ask for confirmation first before calling the tool.
+- Destructive actions (delete_file, empty_recycle_bin, clean_temp_files, shutdown) are confirmed by Ultron itself, not by you. Call the tool; the user is asked, and it only runs if they agree.
 - To remember facts, use save_memory. To recall facts about the user, use search_memories FIRST.
 - For reminders, follow the REMINDERS rules above: clock times use set_reminder_at / set_recurring_reminder_at, durations use set_reminder."""
         if truth_mode:
@@ -1025,8 +1229,8 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 parsed = json.loads(match)
                 if "name" in parsed:
                     calls.append(parsed)
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                print(f"[Tools] ignored an unparsable tool call: {e}")
         return calls
 
     def _strip_tool_calls_from_text(self, text: str) -> str:
@@ -1060,7 +1264,182 @@ Your response: Let me find some great Malayalam songs for you, sir.
                     return "play"
                 break  # Only check the most recent user message
 
-        return "play"  # safe default
+        # No media intent in what the user actually said. Guessing "play" here
+        # meant that "open spotify" started blasting music, because a weak
+        # local model calls this tool with no action and the fallback filled
+        # one in. Starting playback is not a safe default — say nothing was
+        # inferred and let the caller refuse.
+        return ""
+
+    def on_tool_event(self, callback):
+        """Registers callback(phase, name, detail) for every tool invocation.
+
+        phase is "start" or "end"; on "end", detail is True when the tool
+        succeeded. Every tool call from both the cloud and local paths funnels
+        through _invoke_tool, so this sees all of them.
+        """
+        self._tool_listeners.append(callback)
+        return callback
+
+    def _emit_tool_event(self, phase: str, name: str, detail=None):
+        for callback in list(self._tool_listeners):
+            try:
+                callback(phase, name, detail)
+            except Exception as e:
+                print(f"[Brain] Tool listener error: {e}")
+
+    def _resolve_memory(self, which):
+        """Finds the single memory the user meant. Returns (memory, problem).
+
+        Deliberately refuses to guess. Deleting the wrong memory is silent and
+        unrecoverable, so an ambiguous phrase comes back as a question rather
+        than a best effort.
+        """
+        text = str(which or "").strip().strip("#.\"'")
+        if not text:
+            return None, "Error: say which memory to forget — a number from the list, or what it is about."
+
+        memories = self.db.list_memories()
+        if not memories:
+            return None, "There is nothing saved about you to forget, sir."
+
+        by_id = {m["id"]: m for m in memories}
+
+        # A bare number refers to the last listing shown to the user.
+        if text.isdigit():
+            index = int(text)
+            listing = getattr(self, "_memory_listing", [])
+            if listing and 1 <= index <= len(listing):
+                memory = by_id.get(listing[index - 1])
+                if memory:
+                    return memory, None
+                return None, f"Error: memory {index} has already been removed. Call list_memories again."
+            if 1 <= index <= len(memories):
+                return memories[index - 1], None
+            return None, (f"Error: there is no memory {index}. "
+                          "Call list_memories to see what is saved.")
+
+        needle = text.lower()
+        matches = [
+            m for m in memories
+            if needle in f"{m['category']} {m['key']} {m['value']}".lower()
+        ]
+        if not matches:
+            return None, (f"Error: nothing saved matches '{text}'. "
+                          "Call list_memories to see what is saved.")
+        if len(matches) > 1:
+            listed = "; ".join(f"'{m['key']}: {m['value']}'" for m in matches[:5])
+            return None, (f"Error: '{text}' matches {len(matches)} memories ({listed}). "
+                          "Ask the user which one they mean, then use its number.")
+        return matches[0], None
+
+    def _detail_delete_memory(self, args: dict):
+        """Names the actual memory on the confirmation card, not the search term."""
+        memory, problem = self._resolve_memory(args.get("which"))
+        if problem or not memory:
+            return None
+        return f"forget what it knows: '{memory['key']}: {memory['value']}'"
+
+    def _run_watched(self, func_name: str, func, kwargs: dict):
+        """Runs a tool, giving up on it if it overruns its budget.
+
+        Python cannot kill a thread, so a tool that overruns keeps running in
+        the background — it is abandoned, not stopped. That is deliberate: the
+        alternative is Ultron staying frozen for as long as the tool sulks,
+        and an abandoned thread at least lets the user be told and carry on.
+        The thread is named after the tool so it can be identified in a dump.
+        """
+        budget = tool_timeout(func_name)
+        if budget is None:
+            return func(**kwargs)
+
+        outcome = {}
+
+        def work():
+            try:
+                outcome["value"] = func(**kwargs)
+            except BaseException as e:  # noqa: BLE001 - re-raised on the caller
+                outcome["error"] = e
+
+        worker = threading.Thread(
+            target=work, daemon=True, name=f"tool:{func_name}"
+        )
+        worker.start()
+        worker.join(budget)
+
+        if worker.is_alive():
+            print(f"[Timeout] {func_name} exceeded {budget}s — abandoning it")
+            raise TimeoutError(
+                f"{func_name} did not finish within {budget} seconds and was "
+                "abandoned, so it may or may not have taken effect. Tell the "
+                "user plainly rather than retrying it."
+            )
+
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome.get("value")
+
+    def _gated_tools(self) -> dict:
+        """The tool table, wrapped so every call goes through _invoke_tool.
+
+        The wrappers keep the original signatures — the workflow runner reads
+        them to decide how to pass a step's arguments.
+        """
+        gated = {}
+        for name, original in self.tool_functions.items():
+            signature = inspect.signature(original)
+
+            def call(*args, _name=name, _sig=signature, **kwargs):
+                bound = _sig.bind_partial(*args, **kwargs)
+                return self._invoke_tool(_name, dict(bound.arguments))
+
+            functools.update_wrapper(call, original)
+            gated[name] = call
+        return gated
+
+    def set_confirm_handler(self, handler):
+        """Registers who asks the user to approve a destructive action.
+
+        The handler takes (tool_name, args, question) and returns True only if
+        a human said yes. With no handler registered there is nobody to ask,
+        so destructive tools are refused rather than assumed approved.
+        """
+        self.confirm_handler = handler
+
+    def _check_confirmation(self, func_name: str, clean_args: dict):
+        """Returns a refusal string if the call must not proceed, else None."""
+        question = confirmation_question(func_name, clean_args)
+        if question is None:
+            return None
+
+        # A tool may know how to describe itself more precisely than its raw
+        # arguments allow — "forget 'Favorite Animal: Elephant'" rather than
+        # "forget the memory matching 'animal'". What the user approves should
+        # be what actually happens.
+        detailer = getattr(self, f"_detail_{func_name}", None)
+        if detailer:
+            try:
+                question = detailer(clean_args) or question
+            except Exception as e:
+                print(f"[Confirm] could not describe {func_name} precisely: {e}")
+
+        if self.confirm_handler is None:
+            print(f"[Confirm] {func_name} refused — no confirmation handler")
+            return (f"Error: {func_name} needs the user's approval and there is "
+                    "no way to ask them right now, so nothing was changed.")
+
+        print(f"[Confirm] asking the user to {question}")
+        try:
+            approved = bool(self.confirm_handler(func_name, clean_args, question))
+        except Exception as e:
+            print(f"[Confirm] handler failed ({e}) — treating as refused")
+            approved = False
+
+        print(f"[Confirm] {func_name} {'approved' if approved else 'REFUSED'}")
+        if approved:
+            return None
+        return (f"Error: the user did not approve this, so nothing was changed. "
+                f"Do not call {func_name} again unless they ask for it directly.")
 
     def _invoke_tool(self, func_name: str, func_args) -> str:
         """Executes a tool by name with loosely-formed arguments.
@@ -1078,6 +1457,13 @@ Your response: Let me find some great Malayalam songs for you, sir.
             args = dict(func_args) if func_args else {}
             if not args.get("action"):
                 inferred = self._infer_media_action()
+                if not inferred:
+                    print("[SmartInfer] system_media_control called with no 'action' "
+                          "and the user asked for no media action — refusing.")
+                    return ("Error: system_media_control needs an explicit 'action' "
+                            "('play', 'pause', 'next' or 'prev'). The user did not ask "
+                            "for playback, so nothing was changed. If they only asked to "
+                            "open an app, use open_application instead.")
                 print(f"[SmartInfer] system_media_control missing 'action' — inferred: '{inferred}'")
                 args["action"] = inferred
             func_args = args
@@ -1087,10 +1473,28 @@ Your response: Let me find some great Malayalam songs for you, sir.
         except ValueError as e:
             return f"Error: {e}"
 
+        # Logged so unexpected behaviour can be traced to the tool that caused
+        # it. With the GUI there is no console, so this lands in ultron.log.
+        print(f"[Tool] {func_name}({clean_args})")
+
+        refusal = self._check_confirmation(func_name, clean_args)
+        if refusal:
+            return refusal
+
+        self._emit_tool_event("start", func_name)
         try:
-            return func(**clean_args)
+            result = self._run_watched(func_name, func, clean_args)
+        except TimeoutError as e:
+            self._emit_tool_event("end", func_name, False)
+            return f"Error: {e}"
         except Exception as e:
+            self._emit_tool_event("end", func_name, False)
             return f"Error executing {func_name}: {e}"
+
+        # A tool can report failure in its return string without raising.
+        ok = not (isinstance(result, str) and result.startswith("Error"))
+        self._emit_tool_event("end", func_name, ok)
+        return result
 
     def _record_usage(self, response):
         """Records token usage from the API response into usage.json."""
@@ -1141,8 +1545,8 @@ Your response: Let me find some great Malayalam songs for you, sir.
         try:
             with open(usage_path, "w") as f:
                 json.dump(data, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Usage] could not write {usage_path}: {e}")
 
     def process_input(self, user_text: str) -> str:
         """Routes user input to the appropriate handler based on the active API."""
@@ -1165,13 +1569,24 @@ Your response: Let me find some great Malayalam songs for you, sir.
         try:
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
 
-            # ── Build a targeted system prompt for this specific query ──────────
+            # ── Build the system prompt for this query ──────────────────────────
             now_str = datetime.datetime.now().strftime('%A, %Y-%m-%d %H:%M:%S')
-            tools_text, matched_groups = self._build_local_tools_prompt_for_query(user_text)
+
+            # Every tool, every turn, by default. Keyword routing could only
+            # ever guess: a phrase that matched the wrong group left the model
+            # unable to do the job with no way to recover. Set
+            # "filter_local_tools": true to trade that risk back for a shorter
+            # prompt on a model that struggles with the full list.
+            if config.get("filter_local_tools", False):
+                tools_text, matched_groups = self._build_local_tools_prompt_for_query(user_text)
+                print(f"[ToolRouter] Groups: {matched_groups} | "
+                      f"Tools in prompt: {tools_text.count(chr(10)) + 1}")
+            else:
+                tools_text = self._build_local_tools_prompt()
+
             targeted_sys_prompt = self._build_local_system_prompt(
                 now_str, self.truth_mode, tools_text=tools_text
             )
-            print(f"[ToolRouter] Groups: {matched_groups} | Tools in prompt: {tools_text.count(chr(10)) + 1}")
 
             # Replace only the system message; preserve the rest of the history
             messages_for_call = [
