@@ -272,9 +272,82 @@ class TestFailuresAreVisible:
         import speech_recognition as sr
 
         listener.recognizer = types.SimpleNamespace(
-            recognize_google=lambda audio: (_ for _ in ()).throw(sr.UnknownValueError()))
+            recognize_google=lambda audio, **kw: (_ for _ in ()).throw(
+                sr.UnknownValueError()))
         listener._process_audio(np.full((16000, 1), 300, dtype=np.int16))
 
         out = capsys.readouterr().out
         assert "could not make out" in out
         assert "threshold" in out, "the numbers are what make it diagnosable"
+
+    def test_the_report_names_the_language(self, listener, capsys):
+        """The locale is a prime suspect when sound arrived but no words did."""
+        import speech_recognition as sr
+
+        listener._language = "en-IN"
+        listener.recognizer = types.SimpleNamespace(
+            recognize_google=lambda audio, **kw: (_ for _ in ()).throw(
+                sr.UnknownValueError()))
+        listener._process_audio(np.full((16000, 1), 300, dtype=np.int16))
+
+        assert "en-IN" in capsys.readouterr().out
+
+
+class TestWhichEnglishItListensFor:
+    """Passing no language silently meant en-US: a different acoustic model
+    and a different vocabulary prior from the one being spoken into it."""
+
+    def test_the_recogniser_is_told_the_language(self, listener):
+        seen = {}
+
+        def fake(audio, **kwargs):
+            seen.update(kwargs)
+            return "pause the music"
+
+        listener.recognizer = types.SimpleNamespace(recognize_google=fake)
+        listener._process_audio(np.full((16000, 1), 300, dtype=np.int16))
+
+        assert seen.get("language"), "no language means en-US by default"
+
+    def test_it_defaults_to_indian_english(self, listener, monkeypatch):
+        from ultron import listener as listener_module
+
+        monkeypatch.setattr(listener_module.config, "get",
+                            lambda key, default=None: default)
+        assert listener.language() == "en-IN"
+
+    def test_the_setting_wins(self, listener, monkeypatch):
+        from ultron import listener as listener_module
+
+        monkeypatch.setattr(
+            listener_module.config, "get",
+            lambda key, default=None: "en-GB" if key == "speech_language" else default)
+        assert listener.language() == "en-GB"
+
+    def test_an_explicit_argument_beats_the_setting(self, monkeypatch):
+        from ultron import listener as listener_module
+
+        monkeypatch.setattr(
+            listener_module.config, "get",
+            lambda key, default=None: "en-GB" if key == "speech_language" else default)
+        assert VoiceListener(language="ml-IN").language() == "ml-IN"
+
+    @pytest.mark.parametrize("blank", ["", "   ", None])
+    def test_a_blank_setting_falls_back_rather_than_meaning_en_us(
+            self, listener, monkeypatch, blank):
+        """Sending language="" is not the same as sending nothing; it would
+        land back on the default nobody chose."""
+        from ultron import listener as listener_module
+
+        monkeypatch.setattr(
+            listener_module.config, "get",
+            lambda key, default=None: blank if key == "speech_language" else default)
+        assert listener.language() == "en-IN"
+
+    def test_the_setting_ships_with_a_default(self):
+        import json
+        import os
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        defaults = json.load(open(os.path.join(root, "settings.default.json")))
+        assert defaults["speech_language"] == "en-IN"

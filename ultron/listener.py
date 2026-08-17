@@ -7,6 +7,8 @@ import sounddevice as sd
 import speech_recognition as sr
 import threading
 
+from ultron.config import config
+
 # Voice activity is judged 20ms at a time, and so is the noise floor.
 FRAME_SECONDS = 0.02
 
@@ -54,6 +56,17 @@ PREROLL_SECONDS = 0.5
 # short enough that the reply does not feel delayed.
 END_OF_PHRASE_SECONDS = 0.8
 
+# The accent and vocabulary the recogniser should expect.
+#
+# SpeechRecognition defaults to en-US when no language is passed, and that
+# default was being taken silently. Google does not merely re-spell the output
+# per locale: each locale is a different acoustic model with a different
+# language prior. Against en-US, Indian English vowels and retroflex
+# consonants are scored as mispronounced American ones, and Indian names,
+# places and code-switched words lose to American vocabulary that the prior
+# ranks higher. The result is a recogniser that mishears a whole accent.
+DEFAULT_SPEECH_LANGUAGE = "en-IN"
+
 # How often, at most, to report sound that could not be understood.
 #
 # Silence made "Ultron ignored me" and "Ultron never heard me" identical, and
@@ -64,8 +77,11 @@ UNHEARD_REPORT_SECONDS = 15.0
 
 class VoiceListener:
     """Continuous background microphone listener using sounddevice and SpeechRecognition with dynamic noise calibration."""
-    def __init__(self, callback_func=None, sample_rate=16000):
+    def __init__(self, callback_func=None, sample_rate=16000, language=None):
         self.sample_rate = sample_rate
+        # None means "whatever the setting says at the time", so changing the
+        # locale takes effect on the next phrase rather than the next launch.
+        self._language = language
         self.callback_func = callback_func
         self.recognizer = sr.Recognizer()
         # Optional veto, called with each transcription before it is delivered.
@@ -86,6 +102,17 @@ class VoiceListener:
         self._preroll = collections.deque()
         # Rate limit for the "could not make that out" report.
         self._last_unheard_report = 0.0
+
+    def language(self) -> str:
+        """The locale to transcribe against.
+
+        An empty or blank setting means the same as an absent one — fall back
+        rather than send "" and quietly get en-US again.
+        """
+        if self._language:
+            return self._language
+        configured = config.get("speech_language", DEFAULT_SPEECH_LANGUAGE)
+        return (configured or "").strip() or DEFAULT_SPEECH_LANGUAGE
 
     def on_level(self, callback):
         """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
@@ -252,7 +279,8 @@ class VoiceListener:
         try:
             raw_bytes = audio_np.tobytes()
             audio_data = sr.AudioData(raw_bytes, self.sample_rate, 2)
-            text = self.recognizer.recognize_google(audio_data)
+            text = self.recognizer.recognize_google(audio_data,
+                                                    language=self.language())
             if not text or not text.strip():
                 return
 
@@ -282,7 +310,7 @@ class VoiceListener:
             peak = float(np.abs(audio_np).max()) if len(audio_np) else 0.0
             print(f"[Voice Engine] heard {seconds:.1f}s of sound but could not "
                   f"make out any words (peak {peak:.0f}, threshold "
-                  f"{self.speech_threshold:.1f})")
+                  f"{self.speech_threshold:.1f}, language {self.language()})")
         except Exception as e:
             # Anything else means the transcription never happened — usually
             # the network. Without this it looks identical to saying nothing.
