@@ -42,6 +42,18 @@ RETUNE_EVERY_SECONDS = 2.0
 FLOOR_RISE_RATE = 0.10
 FLOOR_FALL_RATE = 0.50
 
+# Audio kept from *before* the threshold was crossed.
+#
+# Without this, recording starts at the moment speech gets loud enough — which
+# is part-way into the first word, because words begin softly. "Pause" arrives
+# as "-se", the recogniser cannot make it out, and the command is lost. Short
+# utterances suffer worst: there is no second word to recover the meaning from.
+PREROLL_SECONDS = 0.5
+
+# Silence that ends a phrase. Long enough to survive thinking mid-sentence,
+# short enough that the reply does not feel delayed.
+END_OF_PHRASE_SECONDS = 0.8
+
 
 class VoiceListener:
     """Continuous background microphone listener using sounddevice and SpeechRecognition with dynamic noise calibration."""
@@ -62,6 +74,9 @@ class VoiceListener:
         self._noise_floor = MIN_THRESHOLD / THRESHOLD_MULTIPLIER
         self._recent_levels = collections.deque()
         self._last_retune = 0.0
+        # The last half second of audio, so a phrase can be recorded from
+        # before the moment it got loud enough to notice.
+        self._preroll = collections.deque()
 
     def on_level(self, callback):
         """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
@@ -185,23 +200,35 @@ class VoiceListener:
                 reference = max(self.speech_threshold * 4.0, 200.0)
                 self._emit_level(min(1.0, rms / reference), rms > self.speech_threshold)
 
+            # Always kept, so the run-up to a phrase is available once one
+            # starts. This is the only copy of the quiet beginning of a word.
+            if self._preroll.maxlen is None and frames:
+                self._preroll = collections.deque(
+                    self._preroll,
+                    maxlen=max(2, int(PREROLL_SECONDS / (frames / self.sample_rate))))
+            self._preroll.append(indata.copy())
+
             # Compare against dynamic speech threshold
             if rms > self.speech_threshold:
                 if not is_speaking:
                     is_speaking = True
+                    # Start from what was already being said. The current chunk
+                    # is the last entry, so this takes it too.
+                    buffer = list(self._preroll)
+                else:
+                    buffer.append(indata.copy())
                 silence_start = None
-                buffer.append(indata.copy())
             else:
                 if is_speaking:
                     buffer.append(indata.copy())
                     if silence_start is None:
                         silence_start = time.time()
-                    elif time.time() - silence_start > 0.8: # 0.8s pause -> end of phrase
+                    elif time.time() - silence_start > END_OF_PHRASE_SECONDS:
                         audio_np = np.concatenate(buffer, axis=0)
                         buffer = []
                         is_speaking = False
                         silence_start = None
-                        
+
                         # Process speech in a background thread
                         threading.Thread(target=self._process_audio, args=(audio_np,), daemon=True).start()
 
@@ -230,9 +257,18 @@ class VoiceListener:
             if self.callback_func:
                 self.callback_func(text)
         except sr.UnknownValueError:
-            # Speech that could not be made out. Expected many times a minute
-            # in a noisy room, so logging each one would bury everything else.
-            pass
+            # Something crossed the threshold and then could not be made out.
+            #
+            # This used to pass silently, which made "Ultron ignored me"
+            # indistinguishable from "Ultron never heard me" — the two have
+            # opposite fixes, and there was no way to tell them apart. The
+            # numbers are what separate them: a very short clip means the
+            # phrase was clipped, a quiet one means the threshold is too high.
+            seconds = len(audio_np) / self.sample_rate
+            peak = float(np.abs(audio_np).max()) if len(audio_np) else 0.0
+            print(f"[Voice Engine] heard {seconds:.1f}s of sound but could not "
+                  f"make out any words (peak {peak:.0f}, threshold "
+                  f"{self.speech_threshold:.1f})")
         except Exception as e:
             # Anything else means the transcription never happened — usually
             # the network. Without this it looks identical to saying nothing.
@@ -246,6 +282,7 @@ class VoiceListener:
             # Start from a clean slate; the device may have changed since the
             # last session, and stale levels would be retuned against.
             self._recent_levels = collections.deque()
+            self._preroll = collections.deque()
             self._last_retune = time.time()
             self.calibrate()
             self.is_listening = True

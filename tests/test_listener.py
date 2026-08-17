@@ -9,12 +9,14 @@ Nothing here opens the microphone; every test scores audio it built itself.
 """
 
 import collections
+import types
 
 import numpy as np
 import pytest
 
 from ultron.listener import (
     MAX_THRESHOLD,
+    PREROLL_SECONDS,
     MIN_THRESHOLD,
     THRESHOLD_MULTIPLIER,
     VoiceListener,
@@ -168,3 +170,111 @@ class TestShortAudio:
 
     def test_no_audio_at_all_is_not_a_crash(self, listener):
         assert listener.noise_floor(np.array([])) == 0.0
+
+
+class TestTheQuietStartOfAWord:
+    """Recording began the instant speech got loud enough — part-way into the
+    first word, because words start softly. "Pause" reached the recogniser as
+    "-se" and could not be made out. Short commands suffered worst: there is no
+    second word to recover the meaning from."""
+
+    CHUNK_SECONDS = 0.05
+
+    def _run(self, listener, chunks, monkeypatch):
+        """Feeds chunks through the real callback and returns captured phrases.
+
+        The detector measures silence with the wall clock, so a fake one is
+        advanced by a chunk's worth of time per callback — otherwise no phrase
+        ever ends and nothing is ever captured.
+        """
+        import ultron.listener as module
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(module.time, "time", lambda: clock["now"])
+
+        captured = []
+        monkeypatch.setattr(listener, "_process_audio", captured.append)
+        # Inline, so the assertions are not racing a thread.
+        monkeypatch.setattr(module.threading, "Thread",
+                            lambda target, args=(), daemon=None: type(
+                                "Inline", (), {"start": lambda self: target(*args)})())
+
+        holder = {}
+
+        class FakeStream:
+            def __init__(self, **kwargs):
+                holder["callback"] = kwargs["callback"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(module.sd, "InputStream", FakeStream)
+        monkeypatch.setattr(module.sd, "sleep",
+                            lambda ms: setattr(listener, "is_listening", False))
+
+        listener.is_listening = True
+        listener._listen_loop()            # captures the callback, then stops
+        callback = holder["callback"]
+
+        listener.is_listening = True
+        for chunk in chunks:
+            callback(chunk, len(chunk), None, None)
+            clock["now"] += self.CHUNK_SECONDS
+        return captured
+
+    def _chunk(self, listener, amplitude):
+        size = int(listener.sample_rate * self.CHUNK_SECONDS)
+        return np.full((size, 1), amplitude, dtype=np.int16)
+
+    def test_audio_from_before_the_threshold_is_kept(self, listener, monkeypatch):
+        listener.speech_threshold = 100.0
+        quiet = [self._chunk(listener, 5) for _ in range(6)]
+        loud = [self._chunk(listener, 400) for _ in range(4)]
+        trailing = [self._chunk(listener, 0) for _ in range(24)]
+
+        captured = self._run(listener, quiet + loud + trailing, monkeypatch)
+
+        assert captured, "a phrase should have been captured"
+        phrase = captured[0].ravel()
+        assert int(np.sum(np.abs(phrase) == 5)) > 0, (
+            "the run-up to the phrase was discarded — the first word is clipped")
+
+    def test_the_whole_phrase_still_arrives(self, listener, monkeypatch):
+        listener.speech_threshold = 100.0
+        chunks = ([self._chunk(listener, 5) for _ in range(4)]
+                  + [self._chunk(listener, 400) for _ in range(6)]
+                  + [self._chunk(listener, 0) for _ in range(24)])
+
+        captured = self._run(listener, chunks, monkeypatch)
+
+        loud_samples = int(np.sum(np.abs(captured[0].ravel()) == 400))
+        expected = 6 * int(listener.sample_rate * self.CHUNK_SECONDS)
+        assert loud_samples == expected, "the loud part must not be truncated"
+
+    def test_the_preroll_is_bounded(self, listener, monkeypatch):
+        listener.speech_threshold = 100.0
+        silence = [self._chunk(listener, 0) for _ in range(200)]
+
+        self._run(listener, silence, monkeypatch)
+
+        assert listener._preroll.maxlen is not None
+        assert len(listener._preroll) <= listener._preroll.maxlen
+        assert listener._preroll.maxlen * self.CHUNK_SECONDS <= PREROLL_SECONDS + 0.1
+
+
+class TestFailuresAreVisible:
+    def test_sound_that_could_not_be_understood_is_reported(self, listener, capsys):
+        """Silence used to be the response to both "ignored you" and "never
+        heard you", which have opposite fixes."""
+        import speech_recognition as sr
+
+        listener.recognizer = types.SimpleNamespace(
+            recognize_google=lambda audio: (_ for _ in ()).throw(sr.UnknownValueError()))
+        listener._process_audio(np.full((16000, 1), 300, dtype=np.int16))
+
+        out = capsys.readouterr().out
+        assert "could not make out" in out
+        assert "threshold" in out, "the numbers are what make it diagnosable"
