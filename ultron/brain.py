@@ -1576,6 +1576,48 @@ Your response: Let me find some great Malayalam songs for you, sir.
               f"the {dropped} oldest messages (still searchable via "
               f"search_past_conversations)")
 
+    def _try_alias(self, user_text: str):
+        """Runs a fixed-meaning command outright, or returns None to use the model.
+
+        "Pause" cost fifty seconds on this machine because every utterance went
+        to a local model running mostly on CPU. Nothing about "pause" needs a
+        model, and by the time it answered the moment had gone.
+
+        The exchange is still written into the history, so a follow-up question
+        about what just happened has something to read.
+        """
+        if not config.get("aliases.enabled", True):
+            return None
+
+        try:
+            from ultron import aliases
+
+            match = aliases.resolve(user_text)
+        except Exception as e:
+            print(f"[Alias] lookup failed, using the model: {e}")
+            return None
+
+        if match is None:
+            return None
+
+        tool, args = match
+        # Belt and braces. The table is curated, but an alias skips the model
+        # and therefore skips the judgement that would question a bad
+        # instruction — so anything gated must never be reachable this way,
+        # whatever someone later adds to the table.
+        if tool in DESTRUCTIVE_TOOLS:
+            print(f"[Alias] refusing to shortcut '{tool}' — it needs confirmation")
+            return None
+
+        print(f"[Alias] {user_text!r} -> {tool}({args}) — no model call")
+        result = str(self._invoke_tool(tool, args))
+
+        self.db.save_message(session_id=self.session_id, role='user', message=user_text)
+        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "assistant", "content": result})
+        self.db.save_message(session_id=self.session_id, role='model', message=result)
+        return result
+
     def note_unprompted_line(self, text: str):
         """Records something Ultron said on its own initiative as a real turn.
 
@@ -1940,6 +1982,10 @@ Your response: Let me find some great Malayalam songs for you, sir.
         # Between turns is the only safe moment: mid-turn the history contains
         # a tool call waiting on its results.
         self._trim_history()
+
+        quick = self._try_alias(user_text)
+        if quick is not None:
+            return quick
         self._in_turn = True
         try:
             if self.active_api == "localapi":
