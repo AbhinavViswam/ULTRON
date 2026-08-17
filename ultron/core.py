@@ -125,6 +125,11 @@ def tool_label(name: str) -> str:
             return label
     return name.replace("_", " ")
 
+# How long to keep waiting for the local model to load, so its real context
+# window can be read. Generous: it only loads when the user first speaks.
+CONTEXT_CHECK_WINDOW_SECONDS = 900
+CONTEXT_CHECK_POLL_SECONDS = 20
+
 # How often the reminder worker scans for due tasks.
 REMINDER_POLL_SECONDS = 15
 
@@ -367,6 +372,48 @@ class UltronCore:
         if not speaking:
             self._emit_level(0.0)
         self._recompute_state()
+
+    def _check_context_window(self):
+        """Says so when the local model cannot hold Ultron's own instructions.
+
+        This failed silently for weeks: the window was 4,096, the system prompt
+        6,736, and everything past the limit was dropped without a word. Ultron
+        looked forgetful when it was in fact being truncated. Whatever else is
+        true, that should never again go unmentioned.
+        """
+        if self.brain.active_api != "localapi":
+            return
+
+        from ultron import local_model
+
+        url = config.get("local_api_url", "http://localhost:11434/v1")
+        deadline = time.monotonic() + CONTEXT_CHECK_WINDOW_SECONDS
+        while self._running and time.monotonic() < deadline:
+            try:
+                length = local_model.fetch_context_length(
+                    url, self.brain.selected_model)
+            except Exception as e:
+                self._status(f"[Model] could not check the context window: {e}")
+                return
+
+            if length:
+                warning = local_model.diagnose(
+                    self.brain._message_size(self.brain.messages[0]),
+                    length,
+                    self.brain.selected_model,
+                )
+                if warning:
+                    self._status(warning)
+                return
+
+            # Unless a Modelfile pins num_ctx, the window does not exist until
+            # Ollama loads the model — which happens on the first request, not
+            # at startup. Waiting for that is the only way to catch the case
+            # that caused this: an unpinned model quietly given 4,096 tokens.
+            for _ in range(CONTEXT_CHECK_POLL_SECONDS * 2):
+                if not self._running:
+                    return
+                time.sleep(0.5)
 
     def _is_own_voice(self, heard: str) -> bool:
         """Whether a transcription is Ultron hearing itself through the speakers.
@@ -823,6 +870,12 @@ class UltronCore:
         routines = threading.Thread(target=self._routine_loop, daemon=True)
         routines.start()
         self._threads.append(routines)
+
+        # Off the startup path: it talks to Ollama, which may be slow or down,
+        # and nothing else waits on the answer.
+        context_check = threading.Thread(target=self._check_context_window, daemon=True)
+        context_check.start()
+        self._threads.append(context_check)
 
         if config.get("microphone_active", True):
             self.start_microphone()
