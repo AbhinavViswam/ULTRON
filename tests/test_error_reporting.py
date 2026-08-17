@@ -40,8 +40,10 @@ class TestSpeechToText:
         assert "transcription failed" in printed
         assert "network is unreachable" in printed
 
-    def test_unintelligible_speech_stays_quiet(self):
-        """Expected many times a minute in a noisy room; logging would flood."""
+    def test_unintelligible_speech_is_reported_but_rate_limited(self):
+        """Silence made "ignored me" and "never heard me" identical, and they
+        have opposite fixes. But this fires many times a minute in a noisy
+        room, so it is reported rarely rather than never."""
         import speech_recognition as sr
 
         from ultron.listener import VoiceListener
@@ -53,9 +55,14 @@ class TestSpeechToText:
                 raise sr.UnknownValueError()
 
         listener.recognizer = Mumble()
-        assert output_of(
-            lambda: listener._process_audio(np.zeros(1600, dtype=np.int16))
-        ) == ""
+        audio = np.zeros(1600, dtype=np.int16)
+
+        first = output_of(lambda: listener._process_audio(audio))
+        assert "could not make out" in first
+        assert "threshold" in first, "the numbers are what make it diagnosable"
+
+        # Immediately again: the room is noisy, not the user repeating himself.
+        assert output_of(lambda: listener._process_audio(audio)) == ""
 
 
 class TestCallbackFailures:

@@ -54,6 +54,13 @@ PREROLL_SECONDS = 0.5
 # short enough that the reply does not feel delayed.
 END_OF_PHRASE_SECONDS = 0.8
 
+# How often, at most, to report sound that could not be understood.
+#
+# Silence made "Ultron ignored me" and "Ultron never heard me" identical, and
+# they have opposite fixes. But in a noisy room this fires many times a minute
+# and would bury everything else, so it is reported rarely rather than never.
+UNHEARD_REPORT_SECONDS = 15.0
+
 
 class VoiceListener:
     """Continuous background microphone listener using sounddevice and SpeechRecognition with dynamic noise calibration."""
@@ -77,6 +84,8 @@ class VoiceListener:
         # The last half second of audio, so a phrase can be recorded from
         # before the moment it got loud enough to notice.
         self._preroll = collections.deque()
+        # Rate limit for the "could not make that out" report.
+        self._last_unheard_report = 0.0
 
     def on_level(self, callback):
         """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
@@ -264,6 +273,11 @@ class VoiceListener:
             # opposite fixes, and there was no way to tell them apart. The
             # numbers are what separate them: a very short clip means the
             # phrase was clipped, a quiet one means the threshold is too high.
+            now = time.time()
+            if now - self._last_unheard_report < UNHEARD_REPORT_SECONDS:
+                return
+            self._last_unheard_report = now
+
             seconds = len(audio_np) / self.sample_rate
             peak = float(np.abs(audio_np).max()) if len(audio_np) else 0.0
             print(f"[Voice Engine] heard {seconds:.1f}s of sound but could not "
