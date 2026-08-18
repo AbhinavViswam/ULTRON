@@ -312,9 +312,140 @@ class TestFallingBack:
         assert defaults["vosk"]["min_confidence"] == 0.0
 
 
+def _engine(monkeypatch, name, endpointing=True):
+    import ultron.listener as module
+
+    def get(key, default=None):
+        if key == "speech_engine":
+            return name
+        if key == "vosk.use_for_endpointing":
+            return endpointing
+        return default
+
+    monkeypatch.setattr(module.config, "get", get)
+
+
+class TestWhoFindsTheWordsAndWhoReadsThem:
+    """Two questions hide behind "which engine": who notices that someone is
+    speaking, and who works out what they said. Google is much better at
+    Indian English than a 55MB model — but Google is a network call, and
+    rationing those calls is the entire reason a threshold existed."""
+
+    def _speak(self, listener, monkeypatch, engine):
+        _engine(monkeypatch, engine)
+        listener._vosk = FakeVosk()
+        listener._audio_queue = queue.Queue(maxsize=64)
+        listener._segment = [np.full(400, 7, dtype=np.int16).tobytes()]
+        return listener
+
+    def test_google_is_handed_the_audio_vosk_delimited(self, listener,
+                                                       monkeypatch):
+        self._speak(listener, monkeypatch, "google")
+        sent = []
+        monkeypatch.setattr(listener, "_process_audio", sent.append)
+        delivered = []
+        listener.callback_func = delivered.append
+
+        listener._finish_phrase("vosks rough guess", 0.9)
+
+        assert len(sent) == 1, "Google never received the phrase"
+        assert list(np.unique(sent[0])) == [7]
+        assert delivered == [], "Vosk's words were used instead of Google's"
+
+    def test_the_offline_engine_uses_its_own_words(self, listener, monkeypatch):
+        self._speak(listener, monkeypatch, "vosk")
+        monkeypatch.setattr(listener, "_process_audio",
+                            lambda audio: pytest.fail("the network was used"))
+        delivered = []
+        listener.callback_func = delivered.append
+
+        listener._finish_phrase("pause the music", 0.9)
+
+        assert delivered == ["pause the music"]
+
+    def test_silence_is_never_sent_over_the_network(self, listener,
+                                                    monkeypatch):
+        """Vosk producing text is the signal that the audio held speech. No
+        phrase, no call — which is what a threshold used to be for."""
+        _engine(monkeypatch, "google")
+        listener._vosk = FakeVosk()
+        listener._audio_queue = queue.Queue(maxsize=8)
+        listener.is_listening = False
+        monkeypatch.setattr(listener, "_process_audio",
+                            lambda audio: pytest.fail("silence was uploaded"))
+
+        listener._decode_loop()          # flush returns nothing
+
+    def test_a_phrase_with_no_audio_behind_it_is_not_uploaded(self, listener,
+                                                              monkeypatch):
+        """Reached at shutdown, when the recogniser reports a phrase but the
+        audio for it has already been handed over. There is nothing to send,
+        and sending nothing is a wasted round trip on an empty clip."""
+        _engine(monkeypatch, "google")
+        listener._segment = []
+        monkeypatch.setattr(listener, "_process_audio",
+                            lambda audio: pytest.fail("uploaded an empty clip"))
+
+        listener._finish_phrase("something", 0.9)
+
+    def test_the_pending_segment_is_bounded(self, listener):
+        listener._segment = [np.zeros(16000, dtype=np.int16).tobytes()
+                             for _ in range(120)]      # ~60s
+        listener._trim_segment()
+
+        held = sum(len(c) for c in listener._segment) / 2 / listener.sample_rate
+        assert held <= 30.0
+
+    def test_trimming_keeps_the_most_recent_audio(self, listener):
+        """The newest audio is what someone just said."""
+        listener._segment = [np.full(16000, i, dtype=np.int16).tobytes()
+                             for i in range(1, 121)]
+        listener._trim_segment()
+
+        kept = np.frombuffer(b"".join(listener._segment), dtype=np.int16)
+        assert 120 in kept and 1 not in kept
+
+    @pytest.mark.parametrize("configured,expected", [
+        ("google", "google"), ("vosk", "vosk"), ("VOSK", "vosk"),
+        ("  google  ", "google"), ("nonsense", "google"), ("", "google"),
+        (None, "google"),
+    ])
+    def test_the_setting_is_read_forgivingly(self, listener, monkeypatch,
+                                             configured, expected):
+        import ultron.listener as module
+        monkeypatch.setattr(module.config, "get",
+                            lambda key, default=None:
+                            configured if key == "speech_engine" else default)
+        assert listener.speech_engine() == expected
+
+    def test_endpointing_can_be_turned_off_for_the_old_behaviour(
+            self, listener, monkeypatch, capsys):
+        _engine(monkeypatch, "google", endpointing=False)
+
+        assert listener.uses_offline_endpointing() is False
+        assert listener._start_offline_engine() is False
+        assert "amplitude threshold" in capsys.readouterr().out
+
+    def test_the_offline_engine_always_endpoints_for_itself(self, listener,
+                                                            monkeypatch):
+        """Vosk cannot transcribe segments it was never asked to find."""
+        _engine(monkeypatch, "vosk", endpointing=False)
+        assert listener.uses_offline_endpointing() is True
+
+    def test_the_settings_ship_with_the_split(self):
+        import os
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "settings.default.json")) as f:
+            defaults = json.load(f)
+        assert defaults["speech_engine"] == "google"
+        assert defaults["vosk"]["use_for_endpointing"] is True
+
+
 class TestShutdown:
-    def test_the_last_phrase_is_not_lost(self, listener):
+    def test_the_last_phrase_is_not_lost(self, listener, monkeypatch):
         """Stopping mid-sentence should still deliver what was said."""
+        _engine(monkeypatch, "vosk")
         fake = FakeVosk()
         fake.flush = lambda: ("goodnight", 0.9)
         listener._vosk = fake
@@ -326,6 +457,21 @@ class TestShutdown:
         listener._decode_loop()
 
         assert got == ["goodnight"]
+
+    def test_the_last_phrase_reaches_google_too(self, listener, monkeypatch):
+        _engine(monkeypatch, "google")
+        fake = FakeVosk()
+        fake.flush = lambda: ("goodnight", 0.9)
+        listener._vosk = fake
+        listener._audio_queue = queue.Queue(maxsize=8)
+        listener._segment = [np.full(400, 3, dtype=np.int16).tobytes()]
+        listener.is_listening = False
+
+        sent = []
+        monkeypatch.setattr(listener, "_process_audio", sent.append)
+        listener._decode_loop()
+
+        assert len(sent) == 1
 
     def test_stop_waits_for_the_decoder(self, listener):
         listener._decoder = threading.Thread(target=lambda: None)

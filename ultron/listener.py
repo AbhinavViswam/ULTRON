@@ -77,6 +77,13 @@ DEFAULT_SPEECH_LANGUAGE = "en-IN"
 # grows without limit takes the whole process down.
 AUDIO_QUEUE_CHUNKS = 64
 
+# Longest stretch of audio sent to the online recogniser as one phrase.
+#
+# Only reached if the offline endpointer never calls an end, which means
+# something is wrong. Trimming the front loses the oldest audio rather than
+# the most recent, because the most recent is what someone just said.
+MAX_SEGMENT_SECONDS = 30.0
+
 # Confidence below which a phrase is treated as noise rather than speech.
 #
 # Zero by default, and deliberately so. The complaint being fixed here is
@@ -127,6 +134,9 @@ class VoiceListener:
         self._vosk = None
         self._audio_queue = None
         self._decoder = None
+        # Audio for the phrase currently being spoken, kept so the online
+        # recogniser can be given exactly what the offline one delimited.
+        self._segment = []
 
     def language(self) -> str:
         """The locale to transcribe against.
@@ -138,6 +148,33 @@ class VoiceListener:
             return self._language
         configured = config.get("speech_language", DEFAULT_SPEECH_LANGUAGE)
         return (configured or "").strip() or DEFAULT_SPEECH_LANGUAGE
+
+    def speech_engine(self) -> str:
+        """Which recogniser turns audio into words.
+
+        Two separate questions hide behind "which engine": who decides that
+        someone is speaking, and who works out what they said. They have
+        different best answers. Google is markedly better at Indian English
+        than a 55MB offline model; but Google is a network call, which is the
+        entire reason an amplitude threshold existed to ration it — and that
+        threshold is what stopped hearing quiet speech.
+
+        So they are separate settings. This one is the transcriber.
+        """
+        value = (config.get("speech_engine", "google") or "google")
+        value = str(value).strip().lower()
+        return value if value in ("google", "vosk") else "google"
+
+    def uses_offline_endpointing(self) -> bool:
+        """Whether Vosk decides where phrases begin and end.
+
+        When it does, no amplitude threshold is consulted at any point: the
+        acoustic model says when speech started, so the quiet beginning of a
+        word is inside the segment rather than cut off before it.
+        """
+        if self.speech_engine() == "vosk":
+            return True
+        return config.get("vosk.use_for_endpointing", True) is not False
 
     def on_level(self, callback):
         """Registers callback(level, is_speech) with 0.0-1.0 mic loudness.
@@ -377,8 +414,10 @@ class VoiceListener:
             except Exception as e:
                 print(f"[Voice Engine] offline recognition failed: {e}")
                 continue
+            self._segment.append(chunk)
+            self._trim_segment()
             if heard:
-                self._on_phrase(*heard)
+                self._finish_phrase(*heard)
 
         # Whatever was still being said when listening stopped.
         try:
@@ -386,7 +425,30 @@ class VoiceListener:
         except Exception:
             remaining = None
         if remaining:
-            self._on_phrase(*remaining)
+            self._finish_phrase(*remaining)
+
+    def _trim_segment(self):
+        """Keeps the pending segment bounded, dropping the oldest audio."""
+        limit = int(self.sample_rate * MAX_SEGMENT_SECONDS) * 2   # int16 bytes
+        total = sum(len(chunk) for chunk in self._segment)
+        while self._segment and total > limit:
+            total -= len(self._segment.pop(0))
+
+    def _finish_phrase(self, text: str, confidence: float):
+        """A phrase has ended. Whoever transcribes it, Vosk found it.
+
+        Vosk having produced text is the useful signal even when its words are
+        not used: it means that stretch of audio contained speech, so it is
+        worth the network call. Silence never gets sent.
+        """
+        segment, self._segment = self._segment, []
+        if self.speech_engine() == "vosk":
+            self._on_phrase(text, confidence)
+            return
+        if not segment:
+            return
+        audio = np.frombuffer(b"".join(segment), dtype=np.int16)
+        self._process_audio(audio)
 
     def min_confidence(self) -> float:
         """How sure the recogniser must be before a phrase is acted on."""
@@ -412,11 +474,16 @@ class VoiceListener:
         threshold bug exists only in the fallback path, so a quiet fallback
         means the symptom returns with nothing to explain why.
         """
+        if not self.uses_offline_endpointing():
+            print(f"[Voice Engine] Google ({self.language()}), gated on an "
+                  f"amplitude threshold (vosk.use_for_endpointing is off)")
+            return False
+
         reason = vosk_engine.unavailable_reason()
         if reason:
-            print(f"[Voice Engine] offline recognition unavailable - {reason}")
-            print(f"[Voice Engine] using Google ({self.language()}) instead, "
-                  f"which needs the network and an amplitude threshold")
+            print(f"[Voice Engine] offline model unavailable - {reason}")
+            print(f"[Voice Engine] Google ({self.language()}) alone, which "
+                  f"needs an amplitude threshold to ration the network calls")
             return False
         try:
             self._vosk = vosk_engine.VoskTranscriber(vosk_engine.model_path(),
@@ -429,8 +496,13 @@ class VoiceListener:
         self._audio_queue = queue.Queue(maxsize=AUDIO_QUEUE_CHUNKS)
         self._decoder = threading.Thread(target=self._decode_loop, daemon=True)
         self._decoder.start()
-        print(f"[Voice Engine] offline recognition active ({self._vosk.name}); "
-              f"no amplitude threshold - every chunk reaches the recogniser")
+        if self.speech_engine() == "vosk":
+            print(f"[Voice Engine] offline: {self._vosk.name} both finds and "
+                  f"transcribes speech. No network, no amplitude threshold.")
+        else:
+            print(f"[Voice Engine] {self._vosk.name} finds the phrase, Google "
+                  f"({self.language()}) transcribes it. No amplitude "
+                  f"threshold; only real speech is sent.")
         return True
 
     def _enqueue(self, indata):

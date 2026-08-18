@@ -8,8 +8,10 @@
   "local_api_url": "http://localhost:11434/v1",
   "microphone_active": true,
   "speech_language": "en-IN",
+  "speech_engine": "google",
   "vosk": {
     "enabled": true,
+    "use_for_endpointing": true,
     "model_path": "",
     "min_confidence": 0.0
   },
