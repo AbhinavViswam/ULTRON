@@ -171,14 +171,33 @@ class TestTheMeasure:
 
 class TestWiring:
     def test_the_listener_asks_before_delivering(self):
+        """Behavioural rather than source-reading, so it holds for whichever
+        recogniser produced the text — the veto now guards both."""
+        from ultron.listener import VoiceListener
+
+        listener = VoiceListener()
+        delivered = []
+        listener.callback_func = delivered.append
+        listener.ignore_check = lambda text: text == "its own voice"
+
+        listener._deliver("its own voice")
+        assert delivered == [], "Ultron obeyed itself"
+
+        listener._deliver("a real command")
+        assert delivered == ["a real command"]
+
+    def test_every_recogniser_goes_through_that_veto(self):
+        """A second engine that delivered directly would bypass the guard
+        entirely, and the symptom would be Ultron answering its own voice."""
         import inspect
 
         from ultron.listener import VoiceListener
 
-        source = inspect.getsource(VoiceListener._process_audio)
-        assert "ignore_check" in source
-        # Checked before the callback, or the command runs anyway.
-        assert source.index("ignore_check") < source.index("self.callback_func(text)")
+        for name in ("_process_audio", "_on_phrase"):
+            source = inspect.getsource(getattr(VoiceListener, name))
+            assert "self.callback_func(" not in source, (
+                f"{name} calls the callback itself instead of via _deliver, "
+                f"so the self-hearing check cannot see it")
 
     def test_the_core_records_what_it_says_and_when_it_speaks(self):
         import inspect

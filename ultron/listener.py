@@ -1,5 +1,6 @@
 import collections
 import os
+import queue
 import sys
 import time
 import numpy as np
@@ -8,6 +9,7 @@ import speech_recognition as sr
 import threading
 
 from ultron.config import config
+from ultron import vosk_engine
 
 # Voice activity is judged 20ms at a time, and so is the noise floor.
 FRAME_SECONDS = 0.02
@@ -67,6 +69,22 @@ END_OF_PHRASE_SECONDS = 0.8
 # ranks higher. The result is a recogniser that mishears a whole accent.
 DEFAULT_SPEECH_LANGUAGE = "en-IN"
 
+# Audio waiting to be decoded, when recognition happens on this machine.
+#
+# Decoding takes about a fifth of real time, so this normally holds one chunk.
+# It is bounded anyway: if the CPU is briefly taken by something else, falling
+# behind and dropping the oldest audio is recoverable, whereas a queue that
+# grows without limit takes the whole process down.
+AUDIO_QUEUE_CHUNKS = 64
+
+# Confidence below which a phrase is treated as noise rather than speech.
+#
+# Zero by default, and deliberately so. The complaint being fixed here is
+# "it does not hear me", and a filter set by guesswork reproduces exactly
+# that complaint while looking like a different bug. The confidence of every
+# phrase is printed, so this can be set from observation rather than taste.
+MIN_CONFIDENCE = 0.0
+
 # How often, at most, to report sound that could not be understood.
 #
 # Silence made "Ultron ignored me" and "Ultron never heard me" identical, and
@@ -102,6 +120,13 @@ class VoiceListener:
         self._preroll = collections.deque()
         # Rate limit for the "could not make that out" report.
         self._last_unheard_report = 0.0
+
+        # Offline recognition, when it is available. While this is set there
+        # is no amplitude threshold in the path at all: every chunk reaches
+        # the recogniser and the acoustic model decides what was speech.
+        self._vosk = None
+        self._audio_queue = None
+        self._decoder = None
 
     def language(self) -> str:
         """The locale to transcribe against.
@@ -212,6 +237,16 @@ class VoiceListener:
 
             nonlocal is_speaking, silence_start, buffer
 
+            if self._vosk is not None:
+                # Nothing is filtered out. The recogniser sees the quiet start
+                # of every word, which is the part an amplitude gate ate.
+                if self._level_listeners:
+                    reference = max(self.speech_threshold * 4.0, 200.0)
+                    self._emit_level(min(1.0, rms / reference),
+                                     rms > self.speech_threshold)
+                self._enqueue(indata)
+                return
+
             # Keep roughly NOISE_WINDOW_SECONDS of history. Chunk size is the
             # driver's choice and can change, so it is measured rather than
             # assumed.
@@ -284,15 +319,7 @@ class VoiceListener:
             if not text or not text.strip():
                 return
 
-            # Asked before the callback, not after: the callback interrupts
-            # speech and runs the command, so a late check would still have
-            # let Ultron cut itself off and obey its own voice.
-            if self.ignore_check and self.ignore_check(text):
-                return
-
-            print(f"\n\n[Voice Input Detected]: {text}")
-            if self.callback_func:
-                self.callback_func(text)
+            self._deliver(text)
         except sr.UnknownValueError:
             # Something crossed the threshold and then could not be made out.
             #
@@ -316,6 +343,111 @@ class VoiceListener:
             # the network. Without this it looks identical to saying nothing.
             print(f"[Voice Engine] transcription failed: {e}")
 
+    def _deliver(self, text: str):
+        """Hands a transcription to whoever asked for it, unless vetoed.
+
+        The veto is asked before the callback, not after: the callback
+        interrupts speech and runs the command, so a late check would still
+        have let Ultron cut itself off and obey its own voice.
+        """
+        if not text or not text.strip():
+            return
+        if self.ignore_check and self.ignore_check(text):
+            return
+        print(f"\n\n[Voice Input Detected]: {text}")
+        if self.callback_func:
+            self.callback_func(text)
+
+    def _decode_loop(self):
+        """Turns queued audio into phrases, off the audio thread.
+
+        Decoding a chunk takes roughly a fifth of its duration, which would
+        fit inside the audio callback — but only on average. That callback
+        runs on the driver's realtime thread, and one slow pass there drops
+        input outright, which would look exactly like the microphone fault
+        this is meant to fix. So the callback only ever enqueues.
+        """
+        while self.is_listening:
+            try:
+                chunk = self._audio_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                heard = self._vosk.accept(chunk)
+            except Exception as e:
+                print(f"[Voice Engine] offline recognition failed: {e}")
+                continue
+            if heard:
+                self._on_phrase(*heard)
+
+        # Whatever was still being said when listening stopped.
+        try:
+            remaining = self._vosk.flush()
+        except Exception:
+            remaining = None
+        if remaining:
+            self._on_phrase(*remaining)
+
+    def min_confidence(self) -> float:
+        """How sure the recogniser must be before a phrase is acted on."""
+        configured = config.get("vosk.min_confidence", MIN_CONFIDENCE)
+        try:
+            return float(configured)
+        except (TypeError, ValueError):
+            return MIN_CONFIDENCE
+
+    def _on_phrase(self, text: str, confidence: float):
+        """A completed phrase from the offline recogniser."""
+        floor = self.min_confidence()
+        if confidence < floor:
+            print(f"[Voice Engine] ignoring {text!r} - confidence "
+                  f"{confidence:.2f} is below {floor:.2f}")
+            return
+        self._deliver(text)
+
+    def _start_offline_engine(self) -> bool:
+        """Loads Vosk if it is there, and says so either way.
+
+        Falling back silently would be the worst outcome available: the
+        threshold bug exists only in the fallback path, so a quiet fallback
+        means the symptom returns with nothing to explain why.
+        """
+        reason = vosk_engine.unavailable_reason()
+        if reason:
+            print(f"[Voice Engine] offline recognition unavailable - {reason}")
+            print(f"[Voice Engine] using Google ({self.language()}) instead, "
+                  f"which needs the network and an amplitude threshold")
+            return False
+        try:
+            self._vosk = vosk_engine.VoskTranscriber(vosk_engine.model_path(),
+                                                     self.sample_rate)
+        except Exception as e:
+            self._vosk = None
+            print(f"[Voice Engine] could not load the offline model: {e}")
+            return False
+
+        self._audio_queue = queue.Queue(maxsize=AUDIO_QUEUE_CHUNKS)
+        self._decoder = threading.Thread(target=self._decode_loop, daemon=True)
+        self._decoder.start()
+        print(f"[Voice Engine] offline recognition active ({self._vosk.name}); "
+              f"no amplitude threshold - every chunk reaches the recogniser")
+        return True
+
+    def _enqueue(self, indata):
+        """Queues audio, dropping the oldest if the decoder falls behind."""
+        data = indata.tobytes()
+        try:
+            self._audio_queue.put_nowait(data)
+        except queue.Full:
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.put_nowait(data)
+            except (queue.Empty, queue.Full):
+                # Another thread beat us to it. Losing one chunk under load is
+                # the intended outcome here; raising into the realtime audio
+                # thread would stop the stream altogether.
+                pass
+
     def start_listening(self, callback_func=None):
         if callback_func:
             self.callback_func = callback_func
@@ -327,10 +459,20 @@ class VoiceListener:
             self._preroll = collections.deque()
             self._last_retune = time.time()
             self.calibrate()
+
+            # Before the decoder starts: its loop runs while this is set, so
+            # a thread started ahead of it would exit immediately.
             self.is_listening = True
+            self._start_offline_engine()
+
             self.thread = threading.Thread(target=self._listen_loop, daemon=True)
             self.thread.start()
             print("[Voice Engine] Continuous background microphone active.")
 
     def stop(self):
         self.is_listening = False
+        decoder, self._decoder = self._decoder, None
+        if decoder and decoder.is_alive():
+            # Long enough for the loop to notice and hand back the last
+            # phrase, short enough not to hang a shutdown on it.
+            decoder.join(timeout=1.0)
