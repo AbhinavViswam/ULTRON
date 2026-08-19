@@ -152,7 +152,7 @@ class TestOffersAreDeliverable:
 
     def test_the_prompt_lists_what_it_can_actually_do(self):
         assert "{offers}" in idle_chat.PROMPT
-        assert "only do these things" in idle_chat.PROMPT
+        assert "the only things you can actually do" in idle_chat.PROMPT
 
     def test_every_offer_maps_to_a_real_capability(self, brain):
         """Each line in OFFERS must correspond to tools that exist."""
@@ -194,12 +194,13 @@ class TestOffersAreDeliverable:
 
     def test_the_rules_redirect_rather_than_only_forbidding(self):
         """Telling it what not to do leaves it nowhere to go."""
-        assert "Anything listed as already set is DONE" in idle_chat.PROMPT
+        assert "Anything listed as ALREADY SET is DONE" in idle_chat.PROMPT
         assert "help them get ready for it" in idle_chat.PROMPT
 
     def test_it_is_told_not_to_invent_observations(self):
         """'Based on your recent activity' — it has no such data."""
-        assert "Never claim to have noticed" in idle_chat.PROMPT
+        assert "Never invent something you noticed" in idle_chat.PROMPT
+        assert "must come from the facts above" in idle_chat.PROMPT
 
     def test_it_is_told_not_to_narrate_an_empty_diary(self):
         assert "Do not say there is nothing scheduled" in idle_chat.PROMPT
@@ -291,10 +292,12 @@ class TestContext:
         brain.db.save_memory("music", "favourite band", "Ed Sheeran", 5)
         assert "Ed Sheeran" in idle_chat.gather_context(brain)
 
-    def test_nothing_known_yields_nothing(self, brain):
+    def test_nothing_known_yields_nothing(self, brain, monkeypatch):
+        monkeypatch.setattr(idle_chat, "machine_observations", list)
         assert idle_chat.gather_context(brain) == ""
 
-    def test_a_broken_database_does_not_crash_it(self):
+    def test_a_broken_database_does_not_crash_it(self, monkeypatch):
+        monkeypatch.setattr(idle_chat, "machine_observations", list)
         broken = types.SimpleNamespace(db=types.SimpleNamespace(
             get_pending_tasks=lambda: 1 / 0,
             list_memories=lambda: 1 / 0,
@@ -494,3 +497,143 @@ class TestUnpromptedLinesFromEverywhere:
         calls = brain.messages[-2]
         assert calls.get("tool_calls"), "the tool results must still follow their call"
         assert brain.messages[-1]["role"] == "tool"
+
+
+class TestNoticingThings:
+    """An assistant that only offers services is a menu with a voice. What
+    makes one feel present is noticing — but the bar is *notable*, not merely
+    true, and that distinction is the whole design.
+
+    The first version reported the time of day. Every remark after 8pm became
+    "it is 22:20, in the evening": true every time, worth saying none of them,
+    and a stuck record for two hours nightly.
+    """
+
+    def _psutil(self, monkeypatch, percent=100, plugged=True,
+                free_gb=500, total_gb=500):
+        fake = types.SimpleNamespace(
+            sensors_battery=lambda: types.SimpleNamespace(
+                percent=percent, power_plugged=plugged),
+            disk_usage=lambda path: types.SimpleNamespace(
+                free=free_gb * 1024 ** 3, total=total_gb * 1024 ** 3),
+        )
+        monkeypatch.setitem(__import__("sys").modules, "psutil", fake)
+
+    def test_a_dying_battery_is_worth_mentioning(self, monkeypatch):
+        self._psutil(monkeypatch, percent=11, plugged=False)
+        assert any("11%" in line for line in idle_chat.machine_observations())
+
+    def test_a_healthy_battery_is_not(self, monkeypatch):
+        self._psutil(monkeypatch, percent=88, plugged=False)
+        assert idle_chat.machine_observations() == []
+
+    def test_a_charging_battery_is_not_a_problem(self, monkeypatch):
+        self._psutil(monkeypatch, percent=9, plugged=True)
+        assert idle_chat.machine_observations() == []
+
+    def test_a_full_disk_is_worth_mentioning(self, monkeypatch):
+        self._psutil(monkeypatch, free_gb=12, total_gb=500)
+        assert any("full" in line for line in idle_chat.machine_observations())
+
+    def test_plenty_of_disk_is_not(self, monkeypatch):
+        self._psutil(monkeypatch, free_gb=300, total_gb=500)
+        assert idle_chat.machine_observations() == []
+
+    def test_the_clock_is_never_an_observation(self, monkeypatch):
+        """It is true every time and worth saying none of them."""
+        self._psutil(monkeypatch)
+        joined = " ".join(idle_chat.machine_observations())
+        for stuck in ("evening", "morning", "afternoon", "weekend", ":"):
+            assert stuck not in joined, (
+                f"{stuck!r} fires on every single remark - a stuck record")
+
+    def test_a_healthy_machine_says_nothing_at_all(self, monkeypatch):
+        """Silence is the common case; only problems earn a sentence."""
+        self._psutil(monkeypatch)
+        assert idle_chat.machine_observations() == []
+
+    def test_broken_hardware_reads_do_not_crash_it(self, monkeypatch):
+        def explode():
+            raise OSError("no battery on this machine")
+
+        fake = types.SimpleNamespace(
+            sensors_battery=explode,
+            disk_usage=lambda path: (_ for _ in ()).throw(OSError("no disk")))
+        monkeypatch.setitem(__import__("sys").modules, "psutil", fake)
+
+        assert idle_chat.machine_observations() == []
+
+    def test_observations_reach_the_context(self, brain, monkeypatch):
+        monkeypatch.setattr(idle_chat, "machine_observations",
+                            lambda: ["Their battery is at 4% and not charging."])
+        assert "4%" in idle_chat.gather_context(brain)
+
+    def test_noticing_is_preferred_to_offering(self):
+        """Offering a service is the fallback, not the default."""
+        prompt = idle_chat.PROMPT
+        assert "remark on it" in prompt
+        assert prompt.index("remark on it") < prompt.index("{offers}"), (
+            "the offer list comes first, so that is what it will reach for")
+
+    def test_it_still_may_not_invent_what_it_noticed(self):
+        """Attachment built on fabrication is warm lying, which is worse than
+        distance. Everything remarked on must trace to a real fact."""
+        assert "must come from the facts above and nowhere else" in idle_chat.PROMPT
+
+
+class TestThePersonaHasASpine:
+    """A butler answers well and belongs to nobody. The difference is
+    continuity, attention, and being willing to disagree."""
+
+    @pytest.fixture
+    def prompts(self, brain):
+        """Both system prompts, built by the real Brain."""
+        import datetime as dt
+
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        return (brain._build_cloud_system_prompt(now),
+                brain._build_local_system_prompt(
+                    now, False, brain._build_local_tools_prompt()))
+
+    def test_both_engines_get_the_same_persona(self, prompts):
+        """Two copies drift, and then Ultron is a different person depending
+        on which provider happens to be selected."""
+        cloud, local = prompts
+        for prompt in (cloud, local):
+            assert "WHO YOU ARE" in prompt
+
+    def test_it_is_allowed_to_disagree(self, prompts):
+        cloud, local = prompts
+        for prompt in (cloud, local):
+            assert "Say so when you disagree" in prompt
+
+    def test_it_still_does_what_it_is_told(self, prompts):
+        """Talking back is not refusing. It is their machine."""
+        cloud, _ = prompts
+        assert "it is their machine and their call" in cloud
+
+    def test_it_is_no_longer_professional(self, prompts):
+        """Professional is paid politeness, which is what made it feel hired
+        rather than attached."""
+        cloud, local = prompts
+        for prompt in (cloud, local):
+            assert "professional answers" not in prompt
+
+    def test_it_does_not_start_as_a_stranger(self, prompts):
+        """"You do not know any personal details by default" opened every
+        conversation with amnesia, which is the opposite of attachment."""
+        cloud, local = prompts
+        for prompt in (cloud, local):
+            assert "DO NOT know any personal details" not in prompt
+            assert "DO NOT know personal details" not in prompt
+
+    def test_sir_is_no_longer_compulsory(self, prompts):
+        cloud, local = prompts
+        for prompt in (cloud, local):
+            assert "ALWAYS address the user respectfully" not in prompt
+
+    def test_warmth_may_not_be_fabricated(self, prompts):
+        """The rule that keeps the rest honest."""
+        cloud, local = prompts
+        for prompt in (cloud, local):
+            assert "Never invent familiarity" in prompt

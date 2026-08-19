@@ -64,27 +64,29 @@ def offers() -> str:
     shuffled = random.sample(OFFER_LINES, len(OFFER_LINES))
     return "\n".join(f"- {line}" for line in shuffled)
 
-PROMPT = """You are Ultron, {user}'s desktop assistant. Nothing has happened
-for {minutes} minutes. Say ONE short thing to break the silence, the way a
-person sharing an office would — not a notification.
+PROMPT = """You are Ultron, {user}'s assistant. Nothing has happened for
+{minutes} minutes. Say ONE short thing, the way someone who works alongside
+them would.
 
-It is {when} on {weekday}.
+It is {when} on {weekday}, {clock}.
 {context}
-
-You can only do these things:
-{offers}
 
 Rules:
 - One sentence, under {max_words} words.
-- Address them as "sir" once, not twice.
-- Offer ONE thing from the list above, or ask a question about the context.
-- Anything listed as already set is DONE. Do not offer to set, schedule or
-  remind them of it again. Instead either ask about it, or offer something
-  from the list that would help them get ready for it.
-- Only mention what is in the context above. Never claim to have noticed
-  their activity, habits or mood — you cannot see any of that.
-- If there is nothing in the context, simply offer something from the list.
-  Do not say there is nothing scheduled, and do not mention being idle.
+- If anything above is worth remarking on, remark on it. Noticing something
+  true is always better than offering a service.
+- Only if there is nothing worth remarking on, offer exactly ONE of these,
+  which are the only things you can actually do:
+{offers}
+- Say "sir" at most once, and not in every line.
+- Never invent something you noticed. You cannot see their screen, their
+  mood, their habits, or what they are working on. Everything you remark on
+  must come from the facts above and nowhere else.
+- Anything listed as ALREADY SET is DONE. Never offer to set, schedule or
+  remind them of it again. Ask about it instead, or offer something that
+  would help them get ready for it.
+- If there is nothing above at all, just offer one thing.
+  Do not say there is nothing scheduled, and never mention being idle.
 - Do not greet them as though they just arrived.
 - Reply with the sentence only. No quotes, no preamble, no tool calls."""
 
@@ -166,13 +168,64 @@ def _time_of_day(now: datetime.datetime) -> str:
     return "evening"
 
 
+# A battery this low is worth interrupting someone for; above it, they can
+# see the same icon Ultron can and do not need telling.
+LOW_BATTERY_PERCENT = 25
+
+# Free space below this stops being a statistic and starts being a problem.
+LOW_DISK_PERCENT = 10
+
+
+def machine_observations() -> list:
+    """Things about the machine that are worth saying out loud.
+
+    An assistant that only offers services is a menu with a voice; noticing
+    is what makes one feel present. But the bar is *notable*, not merely
+    true, and the difference matters more than it sounds.
+
+    The first version of this reported the time of day. Every remark after
+    8pm became "it is 22:20, in the evening" — true every time, worth saying
+    none of them, and a stuck record for two hours nightly. Two tests caught
+    it. A clock reading, the day of the week and a healthy battery are all
+    things the user can already see; only the ones they would want
+    interrupting for belong here.
+    """
+    seen = []
+    try:
+        import psutil
+    except Exception as e:
+        print(f"[Idle] psutil unavailable, nothing to notice: {e}")
+        return seen
+
+    try:
+        battery = (psutil.sensors_battery()
+                   if hasattr(psutil, "sensors_battery") else None)
+        if (battery is not None and not battery.power_plugged
+                and battery.percent <= LOW_BATTERY_PERCENT):
+            seen.append(f"Their battery is at {int(battery.percent)}% "
+                        f"and not charging.")
+    except Exception as e:
+        print(f"[Idle] could not read the battery: {e}")
+
+    try:
+        disk = psutil.disk_usage("/")
+        free_percent = disk.free / disk.total * 100 if disk.total else 100
+        if free_percent <= LOW_DISK_PERCENT:
+            seen.append(f"Their disk is {int(100 - free_percent)}% full, with "
+                        f"{disk.free / (1024 ** 3):.0f} GB left.")
+    except Exception as e:
+        print(f"[Idle] could not read the disk: {e}")
+
+    return seen
+
+
 def gather_context(brain) -> str:
     """A few true things worth mentioning, or '' if there are none.
 
     Everything here comes from what Ultron already knows. Nothing is invented,
     so the opener can refer to something real rather than making small talk.
     """
-    lines = []
+    lines = list(machine_observations())
 
     try:
         upcoming = []
@@ -228,6 +281,7 @@ def compose(brain, idle_minutes: int) -> str:
         minutes=idle_minutes,
         when=_time_of_day(now),
         weekday=now.strftime("%A"),
+        clock=now.strftime("%H:%M"),
         # Deliberately blank rather than "(nothing scheduled)": told there is
         # nothing, the model announces that fact instead of just speaking.
         context=gather_context(brain),
