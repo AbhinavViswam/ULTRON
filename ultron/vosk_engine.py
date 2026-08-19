@@ -64,6 +64,95 @@ def model_path():
     return None
 
 
+def ensure_model():
+    """The model directory, fetching it once if this is a fresh install.
+
+    Without this the offline engine is only ever available on the machine that
+    downloaded the model by hand. Everywhere else it reports itself missing
+    and quietly falls back to Google *and its amplitude threshold* — so the
+    microphone bug returns on any fresh clone while the code still looks
+    correct. A 36MB download is a much smaller cost than that.
+
+    Guarded so a disabled or uninstalled engine never downloads anything.
+    """
+    if config.get("vosk.enabled", True) is False:
+        return None
+    try:
+        import vosk  # noqa: F401
+    except Exception:
+        return None
+
+    existing = model_path()
+    if existing:
+        return existing
+    if config.get("vosk.auto_download", True) is False:
+        return None
+    return download_model()
+
+
+def download_model(url: str = MODEL_URL, name: str = DEFAULT_MODEL_NAME):
+    """Downloads and unpacks a model, or returns None having said why.
+
+    Everything lands in a scratch directory and is renamed into place only
+    once it is complete. An interrupted download must not leave behind
+    something that looks like a working model: that fails later, further from
+    the cause, and looks like a corrupt install rather than a partial one.
+    """
+    import shutil
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    final = os.path.join(MODELS_DIR, name)
+    try:
+        os.makedirs(MODELS_DIR, exist_ok=True)
+    except OSError as e:
+        print(f"[Voice Engine] cannot create {MODELS_DIR}: {e}")
+        return None
+
+    scratch = tempfile.mkdtemp(prefix="vosk-download-", dir=MODELS_DIR)
+    archive = os.path.join(scratch, "model.zip")
+    print(f"[Voice Engine] First run: downloading the offline speech model "
+          f"({name}). About 36MB, once.")
+
+    last = [-1]
+
+    def progress(blocks, block_size, total):
+        if total <= 0:
+            return
+        percent = min(100, int(blocks * block_size * 100 / total))
+        if percent >= last[0] + 20:
+            last[0] = percent
+            print(f"[Voice Engine]   {percent}%")
+
+    try:
+        urllib.request.urlretrieve(url, archive, reporthook=progress)
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(scratch)
+
+        unpacked = os.path.join(scratch, name)
+        if not os.path.isdir(unpacked):
+            # Some archives are named differently from their contents.
+            candidates = [os.path.join(scratch, entry)
+                          for entry in os.listdir(scratch)
+                          if entry.startswith("vosk-model")]
+            candidates = [c for c in candidates if os.path.isdir(c)]
+            if not candidates:
+                raise RuntimeError("the archive held no model directory")
+            unpacked = candidates[0]
+
+        os.replace(unpacked, final)
+        print(f"[Voice Engine] Offline speech model ready ({name}).")
+        return final
+    except Exception as e:
+        print(f"[Voice Engine] could not download the offline model: {e}")
+        print(f"[Voice Engine] Ultron still works; it will use Google instead. "
+              f"To install it by hand, unzip {url} into {MODELS_DIR}")
+        return None
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def unavailable_reason():
     """Why offline recognition cannot be used, or None if it can.
 
@@ -77,8 +166,10 @@ def unavailable_reason():
     except Exception as e:
         return f"the vosk package is not installed ({e})"
     if model_path() is None:
-        return (f"no model in {MODELS_DIR} — download {MODEL_URL} "
-                f"and unzip it there")
+        if config.get("vosk.auto_download", True) is False:
+            return (f"no model in {MODELS_DIR} and auto-download is "
+                    f"off - unzip {MODEL_URL} there")
+        return f"no model in {MODELS_DIR} and it could not be downloaded"
     return None
 
 

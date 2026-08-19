@@ -11,6 +11,7 @@
   "speech_engine": "google",
   "vosk": {
     "enabled": true,
+    "auto_download": true,
     "use_for_endpointing": true,
     "model_path": "",
     "min_confidence": 0.0

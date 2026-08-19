@@ -15,6 +15,7 @@ Nothing here loads the real model — these have to pass on a clone with no
 """
 
 import json
+import os
 import queue
 import threading
 
@@ -480,3 +481,138 @@ class TestShutdown:
 
         assert listener.is_listening is False
         assert listener._decoder is None
+
+
+def _make_archive(tmp_path, inner_name="vosk-model-small-en-in-0.4"):
+    """A zip shaped like a real model download, served from disk."""
+    import zipfile
+
+    root = tmp_path / "src" / inner_name
+    (root / "am").mkdir(parents=True)
+    (root / "am" / "final.mdl").write_text("weights")
+    (root / "README").write_text("model")
+
+    archive = tmp_path / "model.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for item in root.rglob("*"):
+            bundle.write(item, item.relative_to(root.parent))
+    return archive.as_uri()          # file:// - real download code, no network
+
+
+class TestGettingTheModelInTheFirstPlace:
+    """The model was downloaded by hand on one machine. Everywhere else the
+    engine reported itself missing and fell back to Google *and its amplitude
+    threshold*, so the microphone bug returned on any fresh clone while the
+    code still looked correct."""
+
+    @pytest.fixture(autouse=True)
+    def _sandbox(self, monkeypatch, tmp_path):
+        """No test may write to the real models directory or the network."""
+        monkeypatch.setattr(vosk_engine, "MODELS_DIR", str(tmp_path / "models"))
+        monkeypatch.setattr(vosk_engine, "download_model",
+                            lambda *a, **k: pytest.fail("downloaded unexpectedly"))
+
+    def _settings(self, monkeypatch, **values):
+        monkeypatch.setattr(vosk_engine.config, "get",
+                            lambda key, default=None: values.get(key, default))
+
+    def test_an_existing_model_is_never_re_downloaded(self, monkeypatch,
+                                                      tmp_path):
+        model = tmp_path / "models" / "vosk-model-small-en-in-0.4"
+        model.mkdir(parents=True)
+        self._settings(monkeypatch)
+
+        assert vosk_engine.ensure_model() == str(model)
+
+    def test_nothing_is_downloaded_when_the_engine_is_off(self, monkeypatch):
+        self._settings(monkeypatch, **{"vosk.enabled": False})
+        assert vosk_engine.ensure_model() is None
+
+    def test_auto_download_can_be_declined(self, monkeypatch):
+        """Someone on a metered connection gets to say no."""
+        self._settings(monkeypatch, **{"vosk.auto_download": False})
+        assert vosk_engine.ensure_model() is None
+
+    def test_declining_is_explained_rather_than_looking_broken(self,
+                                                               monkeypatch):
+        self._settings(monkeypatch, **{"vosk.auto_download": False})
+        reason = vosk_engine.unavailable_reason()
+        assert "auto-download is" in reason and "off" in reason
+
+    def test_a_real_archive_is_unpacked_into_place(self, monkeypatch, tmp_path):
+        monkeypatch.undo()      # this one exercises the real download_model
+        monkeypatch.setattr(vosk_engine, "MODELS_DIR", str(tmp_path / "models"))
+        url = _make_archive(tmp_path)
+
+        got = vosk_engine.download_model(url=url)
+
+        assert got is not None
+        assert os.path.isfile(os.path.join(got, "am", "final.mdl"))
+
+    def test_an_archive_named_differently_is_still_found(self, monkeypatch,
+                                                         tmp_path):
+        monkeypatch.undo()
+        monkeypatch.setattr(vosk_engine, "MODELS_DIR", str(tmp_path / "models"))
+        url = _make_archive(tmp_path, inner_name="vosk-model-en-in-0.5")
+
+        got = vosk_engine.download_model(url=url, name="whatever-we-asked-for")
+
+        assert got is not None and os.path.isdir(got)
+
+    def test_a_failed_download_leaves_nothing_behind(self, monkeypatch,
+                                                    tmp_path):
+        """A half-unpacked directory would look like a working model and fail
+        later, far from the cause."""
+        monkeypatch.undo()
+        models = tmp_path / "models"
+        monkeypatch.setattr(vosk_engine, "MODELS_DIR", str(models))
+
+        assert vosk_engine.download_model(
+            url=(tmp_path / "nothing-here.zip").as_uri()) is None
+
+        leftovers = list(models.iterdir()) if models.exists() else []
+        assert leftovers == [], f"scratch files survived: {leftovers}"
+
+    def test_an_archive_without_a_model_is_refused(self, monkeypatch, tmp_path):
+        import zipfile
+
+        monkeypatch.undo()
+        models = tmp_path / "models"
+        monkeypatch.setattr(vosk_engine, "MODELS_DIR", str(models))
+        junk = tmp_path / "junk.zip"
+        with zipfile.ZipFile(junk, "w") as bundle:
+            bundle.writestr("readme.txt", "not a model")
+
+        assert vosk_engine.download_model(url=junk.as_uri()) is None
+        assert list(models.iterdir()) == []
+
+    def test_a_failure_says_ultron_still_works(self, monkeypatch, tmp_path,
+                                               capsys):
+        """The fallback is real, and someone reading the log should know it."""
+        monkeypatch.undo()
+        monkeypatch.setattr(vosk_engine, "MODELS_DIR", str(tmp_path / "models"))
+
+        vosk_engine.download_model(url=(tmp_path / "gone.zip").as_uri())
+
+        out = capsys.readouterr().out
+        assert "still works" in out and "Google" in out
+
+    def test_the_setting_ships_with_a_default(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "settings.default.json")) as f:
+            defaults = json.load(f)
+        assert defaults["vosk"]["auto_download"] is True
+
+
+class TestStartupFetchesTheModel:
+    def test_the_listener_tries_before_giving_up(self, listener, monkeypatch):
+        """Otherwise the download never happens on the one run that needs it."""
+        called = []
+        monkeypatch.setattr(vosk_engine, "ensure_model",
+                            lambda: called.append(True))
+        monkeypatch.setattr(vosk_engine, "unavailable_reason",
+                            lambda: "no model")
+
+        listener._start_offline_engine()
+
+        assert called, "startup never attempted to fetch the model"

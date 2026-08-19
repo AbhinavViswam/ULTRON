@@ -479,6 +479,7 @@ class VoiceListener:
                   f"amplitude threshold (vosk.use_for_endpointing is off)")
             return False
 
+        vosk_engine.ensure_model()          # downloads once, on first run
         reason = vosk_engine.unavailable_reason()
         if reason:
             print(f"[Voice Engine] offline model unavailable - {reason}")
