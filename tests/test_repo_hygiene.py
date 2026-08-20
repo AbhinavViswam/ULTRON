@@ -148,5 +148,7 @@ class TestTheTemplateStaysUsable:
                          "microphone_active"):
             assert required in defaults or required in BUILTIN_DEFAULTS, (
                 f"{required} has no default, so a fresh clone cannot start")
-        assert Config().active_provider() in (
-            "openrouterapi", "geminiapi", "localapi")
+        # Derived, not listed: a hardcoded tuple here went stale the moment
+        # a fourth provider was added, and failed for the wrong reason.
+        from ultron.config import PROVIDER_KEYS
+        assert Config().active_provider() in PROVIDER_KEYS

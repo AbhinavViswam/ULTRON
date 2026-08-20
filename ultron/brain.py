@@ -497,11 +497,13 @@ class Brain:
     PROVIDER_BASE_URLS = {
         "openrouterapi": "https://openrouter.ai/api/v1",
         "geminiapi": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "groqapi": "https://api.groq.com/openai/v1",
     }
 
     PROVIDER_LABELS = {
         "openrouterapi": "OpenRouter",
         "geminiapi": "Gemini",
+        "groqapi": "Groq",
         "localapi": "Local",
     }
 

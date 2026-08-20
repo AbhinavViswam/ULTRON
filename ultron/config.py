@@ -42,9 +42,11 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 BUILTIN_DEFAULTS = {
     "openrouterapi": True,
     "geminiapi": False,
+    "groqapi": False,
     "localapi": False,
     "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
     "gemini_model": "gemini-2.5-flash",
+    "groq_model": "openai/gpt-oss-20b",
     "local_model": "gemma4:e2b",
     "local_api_url": "http://localhost:11434/v1",
     "microphone_active": True,
@@ -57,6 +59,7 @@ BUILTIN_DEFAULTS = {
 PROVIDER_KEYS = {
     "openrouterapi": "openrouter",
     "geminiapi": "google",
+    "groqapi": "groq",
     "localapi": None,
 }
 
@@ -216,7 +219,7 @@ class Config:
 
     def active_provider(self) -> str:
         """The first provider flag set to true, defaulting to OpenRouter."""
-        for name in ("openrouterapi", "geminiapi", "localapi"):
+        for name in PROVIDER_KEYS:
             if self.get(name) is True:
                 return name
         return "openrouterapi"
@@ -233,6 +236,7 @@ class Config:
         setting = {
             "openrouterapi": "openrouter_model",
             "geminiapi": "gemini_model",
+            "groqapi": "groq_model",
             "localapi": "local_model",
         }[provider]
         return self.get(setting) or self.get("model") or BUILTIN_DEFAULTS[setting]

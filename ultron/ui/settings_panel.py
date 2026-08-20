@@ -21,6 +21,7 @@ from ultron.ui import theme
 PROVIDER_CHOICES = [
     ("OpenRouter", "openrouterapi"),
     ("Gemini", "geminiapi"),
+    ("Groq", "groqapi"),
     ("Local (Ollama)", "localapi"),
 ]
 
@@ -28,6 +29,7 @@ PROVIDER_CHOICES = [
 MODEL_SETTING = {
     "openrouterapi": "openrouter_model",
     "geminiapi": "gemini_model",
+    "groqapi": "groq_model",
     "localapi": "local_model",
 }
 
