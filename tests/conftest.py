@@ -82,3 +82,20 @@ def qt_app():
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_usage(tmp_path, monkeypatch):
+    """Keeps the tool tally out of the user's real data directory.
+
+    Brain seeds every tool into the tally as it starts, so every test that
+    builds a Brain was writing to data/tool_usage.json - the same file that
+    is supposed to record what the *user* actually does. Zeros are harmless,
+    but any test that runs a tool would have inflated the real counts, and
+    the whole point of that file is to be trustworthy enough to delete tools
+    on the strength of it.
+    """
+    from ultron import tool_usage
+
+    monkeypatch.setattr(tool_usage, "USAGE_PATH",
+                        str(tmp_path / "tool_usage.json"))

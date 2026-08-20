@@ -9,6 +9,7 @@ import threading
 from openai import OpenAI
 
 from ultron.config import config, PROVIDER_KEYS
+from ultron import tool_usage
 from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
@@ -1207,6 +1208,9 @@ class Brain:
         
         # Generate the JSON schema for OpenRouter tools
         self.tools_schema = [ToolBridge.function_to_schema(func) for func in self.tool_functions.values()]
+        # Every tool gets a row immediately, including ones never called: a
+        # tally of only what has run cannot answer "what do I never use".
+        tool_usage.register(self.tool_functions.keys())
         
         now_str = datetime.datetime.now().strftime('%A, %Y-%m-%d %H:%M:%S')
         
@@ -2060,14 +2064,17 @@ Your response: Let me find some great Malayalam songs for you, sir.
             result = self._run_watched(func_name, func, clean_args)
         except TimeoutError as e:
             self._emit_tool_event("end", func_name, False)
+            tool_usage.record(func_name, False)
             return f"Error: {e}"
         except Exception as e:
             self._emit_tool_event("end", func_name, False)
+            tool_usage.record(func_name, False)
             return f"Error executing {func_name}: {e}"
 
         # A tool can report failure in its return string without raising.
         ok = not (isinstance(result, str) and result.startswith("Error"))
         self._emit_tool_event("end", func_name, ok)
+        tool_usage.record(func_name, ok)
         return result
 
     def _record_usage(self, response):
