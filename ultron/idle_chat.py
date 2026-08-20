@@ -253,6 +253,40 @@ def gather_context(brain) -> str:
         print(f"[Idle] could not read reminders for context: {e}")
 
     try:
+        todos = brain.db.list_todos()
+        now = datetime.datetime.now()
+        overdue, dated, undated = [], [], []
+        for todo in todos:
+            due = None
+            if todo["due_date"]:
+                try:
+                    due = datetime.datetime.fromisoformat(todo["due_date"])
+                except (TypeError, ValueError):
+                    due = None
+            if due and due < now:
+                overdue.append(f"{todo['task']} (was due {due:%d %b})")
+            elif due:
+                dated.append(f"{todo['task']} (due {due:%d %b})")
+            else:
+                undated.append(todo["task"])
+
+        # Overdue first, then deadlines, then the rest. A long list read out
+        # loud is a lecture, so only the top few reach the model - and the
+        # count tells it there are more without naming them.
+        ordered = overdue + dated + undated
+        if ordered:
+            named = "; ".join(ordered[:3])
+            extra = (f", and {len(ordered) - 3} more"
+                     if len(ordered) > 3 else "")
+            lines.append(f"Still on their todo list: {named}{extra}.")
+        if overdue:
+            count = len(overdue)
+            lines.append(f"{count} of those "
+                         f"{'is' if count == 1 else 'are'} past the due date.")
+    except Exception as e:
+        print(f"[Idle] could not read the todo list for context: {e}")
+
+    try:
         memories = brain.db.list_memories()
         if memories:
             picked = choose_memories(memories)

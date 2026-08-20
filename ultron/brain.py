@@ -87,6 +87,10 @@ DESTRUCTIVE_TOOLS = {
     ),
     "system_power_control": _describe_power,
     "delete_reminder": lambda args: f"delete reminder {args.get('task_id', '?')}",
+    "delete_todo": lambda args: (
+        f"permanently delete the todo matching '{args.get('which', '?')}' - "
+        f"marking it done keeps it, deleting does not"
+    ),
     "delete_memory": lambda args: (
         f"forget the memory matching '{args.get('which', '?')}'"
     ),
@@ -272,6 +276,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "reschedule_routine", "last_routine_result",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+        "add_todo", "list_todos", "complete_todo", "reopen_todo", "delete_todo",
         "snooze_reminder",
         # Always reachable: if a modifier is stuck the user cannot type
         # comfortably, so asking by voice must work whatever else is loaded.
@@ -629,6 +634,110 @@ class Brain:
             self.db.add_task(description, scheduled.isoformat(), freq, until_date_iso)
             return (f"Recurring reminder '{description}' set to repeat {freq}, "
                     f"starting {scheduled.strftime('%A, %Y-%m-%d at %I:%M %p')}.")
+
+        def add_todo(task: str, due_date: str = "") -> str:
+            """Adds something to the user's todo list to do later. Use for "add X to my todo list", "I need to do X", "remind me to do X someday". due_date is optional and only for things with a real deadline.
+
+            Args:
+                task: What they have to do.
+                due_date: Optional deadline, e.g. '2026-08-25' or 'friday'.
+            """
+            task = (task or "").strip()
+            if not task:
+                return "Error: a todo needs a description."
+
+            when = None
+            if (due_date or "").strip():
+                try:
+                    when = parse_time_string(due_date).isoformat()
+                except ValueError:
+                    # A deadline that could not be read is not worth losing the
+                    # todo over; it is kept without one and the user is told.
+                    todo_id = self.db.add_todo(task)
+                    return (f"Added '{task}' to your todo list [{todo_id}], but "
+                            f"I could not make sense of '{due_date}' as a date, "
+                            f"so it has no deadline.")
+
+            todo_id = self.db.add_todo(task, when)
+            if when:
+                stamp = datetime.datetime.fromisoformat(when).strftime("%A, %d %B")
+                return f"Added '{task}' to your todo list [{todo_id}], due {stamp}."
+            return f"Added '{task}' to your todo list [{todo_id}]."
+
+        def list_todos(include_done: bool = False) -> str:
+            """Lists the user's todo list. Use for "what's on my todo list", "what do I have to do", "my pending tasks"."""
+            rows = self.db.list_todos(include_done=include_done)
+            if not rows:
+                return ("Your todo list is empty." if not include_done
+                        else "You have no todos at all, done or pending.")
+
+            now = datetime.datetime.now()
+            lines = []
+            for row in rows:
+                mark = "done" if row["status"] == "done" else "pending"
+                when = ""
+                if row["due_date"]:
+                    try:
+                        due = datetime.datetime.fromisoformat(row["due_date"])
+                        overdue = due < now and row["status"] == "pending"
+                        when = (f" - due {due.strftime('%A, %d %B')}"
+                                f"{' (OVERDUE)' if overdue else ''}")
+                    except (TypeError, ValueError):
+                        when = ""
+                lines.append(f"[{row['id']}] {row['task']} ({mark}){when}")
+            return "Todo list:\n" + "\n".join(lines)
+
+        def _one_todo(which: str, include_done: bool = False):
+            """The single todo *which* refers to, or an error string.
+
+            Spoken commands name a todo rather than its number, so the text is
+            matched first and the id is the fallback. An ambiguous match is
+            refused rather than guessed: completing the wrong item is silent,
+            and the user would not find out until they looked.
+            """
+            which = (which or "").strip()
+            if not which:
+                return "Error: which todo? Say part of its description or its number."
+
+            if which.isdigit():
+                for row in self.db.list_todos(include_done=True):
+                    if row["id"] == int(which):
+                        return row
+                return f"Error: there is no todo numbered {which}."
+
+            matches = self.db.find_todos(which, include_done=include_done)
+            if not matches:
+                return f"Error: nothing on your todo list matches '{which}'."
+            if len(matches) > 1:
+                listed = "; ".join(f"[{m['id']}] {m['task']}" for m in matches[:5])
+                return (f"Error: '{which}' matches more than one todo - {listed}. "
+                        f"Say the number instead.")
+            return matches[0]
+
+        def complete_todo(which: str) -> str:
+            """Marks a todo as done. Use for "I finished X", "mark X as done", "tick off X". `which` is part of its description, or its number."""
+            found = _one_todo(which)
+            if isinstance(found, str):
+                return found
+            if not self.db.complete_todo(found["id"]):
+                return f"'{found['task']}' was already marked done."
+            return f"Marked '{found['task']}' as done."
+
+        def reopen_todo(which: str) -> str:
+            """Puts a completed todo back on the pending list. Use for "I did not actually finish X", "put X back on my list"."""
+            found = _one_todo(which, include_done=True)
+            if isinstance(found, str):
+                return found
+            self.db.reopen_todo(found["id"])
+            return f"'{found['task']}' is back on your todo list."
+
+        def delete_todo(which: str) -> str:
+            """Deletes a todo entirely. Use only when the user wants it gone rather than done - completing is usually what they mean."""
+            found = _one_todo(which, include_done=True)
+            if isinstance(found, str):
+                return found
+            self.db.delete_todo(found["id"])
+            return f"Deleted '{found['task']}' from your todo list."
 
         def delete_reminder(task_id: int) -> str:
             """Deletes a reminder by its numeric id. Call list_reminders first to find the id."""
@@ -1008,6 +1117,11 @@ class Brain:
             "list_reminders": list_reminders,
             "snooze_reminder": snooze_reminder,
             "delete_reminder": delete_reminder,
+            "add_todo": add_todo,
+            "list_todos": list_todos,
+            "complete_todo": complete_todo,
+            "reopen_todo": reopen_todo,
+            "delete_todo": delete_todo,
             # ── System & Apps ──────────────────────────────────────────────
             "open_application": open_application,
             "close_application": close_application,

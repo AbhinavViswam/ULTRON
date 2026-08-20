@@ -84,6 +84,10 @@ _add("adjust_volume", {"action": "mute"},
 _add("list_reminders", {},
      "list reminders", "show reminders", "what are reminders",
      "what reminders do i have", "my reminders")
+_add("list_todos", {},
+     "list todos", "show todos", "my todos", "todo list", "my todo list",
+     "what is on my todo list", "what do i have to do", "pending tasks",
+     "what are my pending tasks")
 _add("list_routines", {},
      "list routines", "show routines", "what are routines", "my routines")
 _add("get_system_health", {},

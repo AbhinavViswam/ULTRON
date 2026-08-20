@@ -74,6 +74,24 @@ class Database:
             if 'until_date' not in columns:
                 cursor.execute("ALTER TABLE tasks ADD COLUMN until_date DATETIME DEFAULT NULL")
 
+            # Things the user means to do, as opposed to things Ultron
+            # should say at a time. Deliberately not the tasks table: a
+            # reminder fires once and is finished, while a todo stays pending
+            # until it is done and can be overdue. Sharing the table would put
+            # todos in front of the reminder loop, which would then read them
+            # aloud at their due date - a different feature than the one asked
+            # for.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS todos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    due_date DATETIME DEFAULT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    completed_at DATETIME DEFAULT NULL
+                )
+            """)
+
             self._init_routines(cursor)
             conn.commit()
 
@@ -98,6 +116,77 @@ class Database:
                 metadatas=[{"role": role, "session_id": session_id, "timestamp": timestamp}],
                 ids=[doc_id]
             )
+
+    # --- todos ---------------------------------------------------------
+
+    def add_todo(self, task: str, due_date: str = None) -> int:
+        """Records something to do later. Returns its id.
+
+        A due date is optional on purpose: most of what people mean to do has
+        no deadline, and forcing one would turn every note into a reminder.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO todos (task, due_date) VALUES (?, ?)",
+                           (task, due_date))
+            conn.commit()
+            return cursor.lastrowid
+
+    def list_todos(self, include_done: bool = False) -> list:
+        """Todos as dictionaries, oldest first, undated ones last.
+
+        Ordering puts anything with a deadline before anything without, so
+        the first few rows are the ones that actually matter today.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            query = "SELECT * FROM todos"
+            if not include_done:
+                query += " WHERE status = 'pending'"
+            query += " ORDER BY due_date IS NULL, due_date ASC, id ASC"
+            return [dict(row) for row in conn.execute(query)]
+
+    def find_todos(self, text: str, include_done: bool = False) -> list:
+        """Pending todos whose text contains *text*, case-insensitively.
+
+        Spoken commands name a todo rather than its number - "mark the bank
+        call as done" - so matching by description is the normal path and the
+        id is the fallback.
+        """
+        needle = (text or "").strip().lower()
+        if not needle:
+            return []
+        return [row for row in self.list_todos(include_done=include_done)
+                if needle in row["task"].lower()]
+
+    def complete_todo(self, todo_id: int) -> bool:
+        """Marks one done. False if there was no such pending todo."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE todos SET status = 'done', "
+                "completed_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'pending'", (todo_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def reopen_todo(self, todo_id: int) -> bool:
+        """Puts a completed todo back on the list."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE todos SET status = 'pending', completed_at = NULL "
+                "WHERE id = ?", (todo_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_todo(self, todo_id: int) -> bool:
+        """Removes one outright. False if it was not there."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+            conn.commit()
+            return cursor.rowcount > 0
 
     def add_task(self, description: str, scheduled_for: str = None, frequency: str = None, until_date: str = None):
         """Add a new task for scheduling."""
