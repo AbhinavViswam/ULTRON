@@ -915,29 +915,75 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         import time
         import pyautogui
         import pyperclip
-        
-        # Launch WhatsApp application
-        open_application("whatsapp")
-        time.sleep(3.0)  # Wait for WhatsApp window to open
-        
-        # Focus search bar (Ctrl+F in WhatsApp)
-        pyautogui.hotkey('ctrl', 'f')
-        time.sleep(0.5)
-        
-        # Type contact name
-        pyperclip.copy(contact_name)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(1.5)
-        pyautogui.press('enter')  # Open chat
-        time.sleep(1.0)
-        
-        # Type message
-        pyperclip.copy(message)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(0.5)
-        pyautogui.press('enter')  # Send message
-        
-        return f"Successfully sent WhatsApp message to '{contact_name}': '{message}'"
+
+        from ultron import whatsapp_window
+
+        contact_name = (contact_name or "").strip()
+        message = (message or "").strip()
+        if not contact_name:
+            return "Error: no contact name was given, so nothing was sent."
+        if not message:
+            return "Error: the message was empty, so nothing was sent."
+
+        # Nothing is typed until WhatsApp is genuinely in front. Previously
+        # this slept three seconds and started pressing keys regardless; on a
+        # cold start the keystrokes went to whatever window had focus, which
+        # meant the message text was typed into someone else's document and
+        # Enter pressed after it.
+        window, problem = whatsapp_window.ensure_ready(
+            lambda: open_application("whatsapp"))
+        if problem:
+            return f"Error: {problem}"
+
+        # The clipboard belongs to the user. Two pastes used to overwrite
+        # whatever they had copied and never give it back.
+        try:
+            saved_clipboard = pyperclip.paste()
+        except Exception:
+            saved_clipboard = None
+
+        try:
+            pyautogui.hotkey("ctrl", "f")
+            time.sleep(0.5)
+
+            pyperclip.copy(contact_name)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(1.5)
+            pyautogui.press("enter")      # open the highlighted chat
+            time.sleep(1.0)
+
+            # Focus can still be lost between opening the chat and typing -
+            # a notification, an alt-tab, the user clicking elsewhere. This
+            # is the last moment before the message itself is typed.
+            front = whatsapp_window.foreground_title().strip()
+            if "whatsapp" not in front.lower():
+                # Reported as the window actually names itself, not as the
+                # lowercased string used for the comparison.
+                return (f"Error: focus moved to {front!r} while opening the "
+                        f"chat, so the message was not typed or sent.")
+
+            pyperclip.copy(message)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.5)
+            pyautogui.press("enter")
+        finally:
+            if saved_clipboard is not None:
+                try:
+                    pyperclip.copy(saved_clipboard)
+                except Exception:
+                    # Restoring the clipboard is a courtesy, not the job. If
+                    # it fails, the message has already been sent and saying
+                    # so matters more than reporting a failed paste.
+                    pass
+
+        # Deliberately not "successfully sent". WhatsApp was open, focused,
+        # and received the keystrokes - that is what was actually observed.
+        # Which chat was highlighted by the search is not checked here, so
+        # claiming delivery to a named person would be asserting more than is
+        # known.
+        return (f"Typed the message into WhatsApp and pressed send for "
+                f"'{contact_name}'. Please check it went to the right chat: "
+                f"'{message}'")
     except Exception as e:
         return f"Failed to send WhatsApp message: {e}"
     finally:
