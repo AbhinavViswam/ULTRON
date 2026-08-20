@@ -616,3 +616,225 @@ class TestStartupFetchesTheModel:
         listener._start_offline_engine()
 
         assert called, "startup never attempted to fetch the model"
+
+
+class TestASentenceSpokenWithABreathInIt:
+    """One sentence must not arrive as two requests.
+
+    The offline endpointer calls the end of an utterance on a short trailing
+    pause. That is right for "pause the music" and wrong for someone drawing
+    breath mid-sentence: the phrase ends, the rest arrives separately, and
+    Ultron answers half a sentence and then answers the remainder with no
+    idea it belonged to the first.
+
+    So an ended phrase is held for a moment. If more speech follows inside
+    that window, the two are joined and delivered as the one sentence they
+    always were.
+    """
+
+    def _listener(self, monkeypatch):
+        from ultron.listener import VoiceListener
+
+        listener = VoiceListener(callback_func=lambda t: heard.append(t))
+        heard = []
+        listener.delivered = heard
+        listener.ignore_check = None
+
+        clock = {"now": 1000.0}
+        listener._clock = lambda: clock["now"]
+        listener.clock = clock
+        monkeypatch.setattr(listener, "_finish_phrase",
+                            lambda text, confidence: heard.append(text))
+        return listener
+
+    def test_two_halves_of_a_sentence_become_one_request(self, monkeypatch):
+        listener = self._listener(monkeypatch)
+
+        listener._hold_phrase("send a message to", 0.9)
+        listener.clock["now"] += 0.4          # a breath, not a full stop
+        listener._hold_phrase("amma saying I am late", 0.8)
+        listener.clock["now"] += 2.0          # genuinely finished now
+        listener._release_if_due()
+
+        assert listener.delivered == ["send a message to amma saying I am late"]
+
+    def test_nothing_is_sent_while_the_sentence_may_continue(self, monkeypatch):
+        """Delivering at once is the bug. It has to wait to know."""
+        listener = self._listener(monkeypatch)
+
+        listener._hold_phrase("what is the weather", 0.9)
+        listener.clock["now"] += 0.3
+        listener._release_if_due()
+
+        assert listener.delivered == [], "it sent half a sentence"
+
+    def test_a_finished_sentence_is_still_delivered(self, monkeypatch):
+        """The join must not turn into a listener that never answers."""
+        listener = self._listener(monkeypatch)
+
+        listener._hold_phrase("pause the music", 0.9)
+        listener.clock["now"] += 1.5
+        listener._release_if_due()
+
+        assert listener.delivered == ["pause the music"]
+
+    def test_three_fragments_all_join(self, monkeypatch):
+        listener = self._listener(monkeypatch)
+
+        for fragment in ("open chrome", "and search for", "onam recipes"):
+            listener._hold_phrase(fragment, 0.9)
+            listener.clock["now"] += 0.5
+        listener.clock["now"] += 2.0
+        listener._release_if_due()
+
+        assert listener.delivered == ["open chrome and search for onam recipes"]
+
+    def test_two_separate_commands_stay_separate(self, monkeypatch):
+        """The window must be short enough that a real pause still divides
+        two commands, or every following sentence would be glued on."""
+        listener = self._listener(monkeypatch)
+
+        listener._hold_phrase("pause the music", 0.9)
+        listener.clock["now"] += 3.0
+        listener._release_if_due()
+        listener._hold_phrase("what is the time", 0.9)
+        listener.clock["now"] += 3.0
+        listener._release_if_due()
+
+        assert listener.delivered == ["pause the music", "what is the time"]
+
+    def test_the_least_confident_part_speaks_for_the_whole(self, monkeypatch):
+        """A sentence is only as trustworthy as its worst-heard piece."""
+        from ultron.listener import VoiceListener
+
+        listener = VoiceListener()
+        clock = {"now": 1000.0}
+        listener._clock = lambda: clock["now"]
+        seen = []
+        listener._finish_phrase = lambda text, confidence: seen.append(confidence)
+
+        listener._hold_phrase("clear words", 0.95)
+        listener._hold_phrase("mumbled bit", 0.20)
+        clock["now"] += 2.0
+        listener._release_if_due()
+
+        assert seen == [0.20]
+
+    def test_stopping_delivers_what_is_held(self, monkeypatch):
+        """Otherwise the last thing said before shutdown is silently lost."""
+        listener = self._listener(monkeypatch)
+
+        listener._hold_phrase("turn off the lights", 0.9)
+        listener._release_pending()
+
+        assert listener.delivered == ["turn off the lights"]
+
+    def test_the_wait_can_be_turned_off(self, monkeypatch):
+        """Zero means the old behaviour, for anyone who prefers speed."""
+        listener = self._listener(monkeypatch)
+        monkeypatch.setattr(listener, "join_window", lambda: 0.0)
+
+        listener._hold_phrase("pause", 0.9)
+
+        assert listener.delivered == ["pause"], "zero should deliver at once"
+
+    def test_a_nonsense_setting_falls_back(self, monkeypatch):
+        from ultron.listener import PHRASE_JOIN_SECONDS, VoiceListener
+        import ultron.listener as module
+
+        listener = VoiceListener()
+        monkeypatch.setattr(module.config, "get",
+                            lambda path, default=None: "soon")
+        assert listener.join_window() == PHRASE_JOIN_SECONDS
+
+    def test_a_negative_setting_is_not_treated_as_the_past(self, monkeypatch):
+        from ultron.listener import VoiceListener
+        import ultron.listener as module
+
+        listener = VoiceListener()
+        monkeypatch.setattr(module.config, "get",
+                            lambda path, default=None: -5)
+        assert listener.join_window() == 0.0
+
+
+class TestTheDecodeLoopActuallyReleases:
+    """Holding a phrase is only half of it -- something has to let go.
+
+    In use, the release happens because silence follows, and silence is
+    precisely when no audio chunk is arriving. Testing _release_if_due on its
+    own cannot see whether the loop ever calls it: dropping the call from the
+    silent branch left every unit test passing while a held sentence would
+    hang until the next word was spoken.
+    """
+
+    def _running_listener(self, monkeypatch, heard_text="turn the lights off"):
+        import queue as queue_module
+
+        from ultron.listener import VoiceListener
+
+        listener = VoiceListener()
+        listener.ignore_check = None
+        listener._audio_queue = queue_module.Queue()
+        listener.is_listening = True
+        # A short window so the test does not sit for a real second.
+        monkeypatch.setattr(listener, "join_window", lambda: 0.05)
+
+        calls = {"n": 0}
+
+        class FakeVosk:
+            def accept(self, chunk):
+                calls["n"] += 1
+                return (heard_text, 0.9) if calls["n"] == 1 else None
+
+            def flush(self):
+                return None
+
+        listener._vosk = FakeVosk()
+
+        delivered = []
+        monkeypatch.setattr(listener, "_finish_phrase",
+                            lambda text, confidence: delivered.append(text))
+        return listener, delivered
+
+    def test_silence_releases_a_held_phrase(self, monkeypatch):
+        import threading
+        import time as real_time
+
+        listener, delivered = self._running_listener(monkeypatch)
+        listener._audio_queue.put(b"\x00\x00" * 100)
+
+        thread = threading.Thread(target=listener._decode_loop, daemon=True)
+        thread.start()
+        try:
+            deadline = real_time.monotonic() + 3.0
+            while not delivered and real_time.monotonic() < deadline:
+                real_time.sleep(0.05)
+            # Read *before* stopping. Shutdown flushes whatever is held, so
+            # checking afterwards cannot tell "released because the room went
+            # quiet" from "released because the listener was turned off" --
+            # and it is the first one this exists to prove.
+            released_while_listening = list(delivered)
+        finally:
+            listener.is_listening = False
+            thread.join(timeout=5.0)
+
+        assert released_while_listening == ["turn the lights off"], (
+            "a finished phrase was never released while the room was quiet")
+
+    def test_stopping_flushes_rather_than_dropping(self, monkeypatch):
+        import threading
+        import time as real_time
+
+        listener, delivered = self._running_listener(monkeypatch,
+                                                     heard_text="good night")
+        monkeypatch.setattr(listener, "join_window", lambda: 600.0)
+        listener._audio_queue.put(b"\x00\x00" * 100)
+
+        thread = threading.Thread(target=listener._decode_loop, daemon=True)
+        thread.start()
+        real_time.sleep(0.4)
+        listener.is_listening = False
+        thread.join(timeout=5.0)
+
+        assert delivered == ["good night"], (
+            "the last thing said before shutdown was dropped")

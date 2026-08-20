@@ -77,6 +77,21 @@ DEFAULT_SPEECH_LANGUAGE = "en-IN"
 # grows without limit takes the whole process down.
 AUDIO_QUEUE_CHUNKS = 64
 
+# How long to wait, after a phrase ends, in case it was not actually over.
+#
+# The offline endpointer calls the end of an utterance on a short trailing
+# pause. That is right for "pause the music" and wrong for a sentence spoken
+# with a breath in the middle of it: drawing breath before naming something,
+# or pausing to think, ends the phrase and what follows arrives as a second,
+# separate request. Ultron then answers half a sentence and answers the rest
+# out of context.
+#
+# So an ended phrase is held rather than sent. If more speech arrives inside
+# this window the two are joined and treated as the one sentence they were.
+# The cost is exactly this much delay before Ultron replies, which is why it
+# is not larger.
+PHRASE_JOIN_SECONDS = 1.0
+
 # Longest stretch of audio sent to the online recogniser as one phrase.
 #
 # Only reached if the offline endpointer never calls an end, which means
@@ -137,6 +152,12 @@ class VoiceListener:
         # Audio for the phrase currently being spoken, kept so the online
         # recogniser can be given exactly what the offline one delimited.
         self._segment = []
+        # A phrase the endpointer has called finished, held back briefly in
+        # case the speaker was only drawing breath. See PHRASE_JOIN_SECONDS.
+        self._pending = []
+        self._pending_since = None
+        # Injectable so the join window can be tested without waiting on it.
+        self._clock = time.monotonic
 
     def language(self) -> str:
         """The locale to transcribe against.
@@ -408,6 +429,10 @@ class VoiceListener:
             try:
                 chunk = self._audio_queue.get(timeout=0.2)
             except queue.Empty:
+                # Still the right moment to notice a held phrase has waited
+                # long enough. Silence is when that timer expires, and
+                # silence is exactly when no chunk is arriving.
+                self._release_if_due()
                 continue
             try:
                 heard = self._vosk.accept(chunk)
@@ -417,7 +442,9 @@ class VoiceListener:
             self._segment.append(chunk)
             self._trim_segment()
             if heard:
-                self._finish_phrase(*heard)
+                self._hold_phrase(*heard)
+            else:
+                self._release_if_due()
 
         # Whatever was still being said when listening stopped.
         try:
@@ -425,7 +452,10 @@ class VoiceListener:
         except Exception:
             remaining = None
         if remaining:
-            self._finish_phrase(*remaining)
+            self._hold_phrase(*remaining)
+        # Stopping is the end of the sentence whether or not the window ran
+        # out; holding it any longer would simply lose it.
+        self._release_pending()
 
     def _trim_segment(self):
         """Keeps the pending segment bounded, dropping the oldest audio."""
@@ -433,6 +463,60 @@ class VoiceListener:
         total = sum(len(chunk) for chunk in self._segment)
         while self._segment and total > limit:
             total -= len(self._segment.pop(0))
+
+    def join_window(self) -> float:
+        """How long an ended phrase waits for the rest of the sentence."""
+        configured = config.get("speech_join_seconds", PHRASE_JOIN_SECONDS)
+        try:
+            window = float(configured)
+        except (TypeError, ValueError):
+            return PHRASE_JOIN_SECONDS
+        # Negative would mean "deliver before it ended", which is not a
+        # setting; zero legitimately means the old behaviour.
+        return max(0.0, window)
+
+    def _hold_phrase(self, text: str, confidence: float):
+        """Keeps a finished phrase back in case more of it is coming.
+
+        The audio segment is deliberately *not* cleared here. When the online
+        recogniser is doing the transcribing it is handed the whole joined
+        stretch, so a sentence split by a breath reaches it as one piece of
+        audio and it can use the context across the join.
+        """
+        if text and text.strip():
+            self._pending.append((text.strip(), confidence))
+        self._pending_since = self._clock()
+
+        if self.join_window() <= 0:
+            self._release_pending()
+
+    def _release_if_due(self):
+        """Sends a held phrase once the join window has passed in silence."""
+        if self._pending_since is None:
+            return
+        if self._clock() - self._pending_since >= self.join_window():
+            self._release_pending()
+
+    def _release_pending(self):
+        """Delivers whatever is being held, as one phrase."""
+        if self._pending_since is None:
+            return
+        parts, self._pending = self._pending, []
+        self._pending_since = None
+        if not parts:
+            # Speech that produced no words. The audio still has to go, or it
+            # would be prepended to the next thing said.
+            self._segment = []
+            return
+
+        text = " ".join(part for part, _c in parts)
+        # The least confident piece speaks for the whole: a sentence is only
+        # as trustworthy as its worst-heard part.
+        confidence = min(c for _p, c in parts)
+        if len(parts) > 1:
+            print(f"[Voice Engine] joined {len(parts)} phrases spoken "
+                  f"together into one request")
+        self._finish_phrase(text, confidence)
 
     def _finish_phrase(self, text: str, confidence: float):
         """A phrase has ended. Whoever transcribes it, Vosk found it.
