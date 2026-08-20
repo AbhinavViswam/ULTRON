@@ -943,6 +943,15 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
             saved_clipboard = None
 
         try:
+            # Checked immediately before the *first* keystroke, not only
+            # before the message. Ctrl+F, a pasted contact name and Enter
+            # sent into an editor is its own small disaster, and the guard
+            # further down would only have caught it afterwards.
+            front = desktop_window.foreground_title().strip()
+            if "whatsapp" not in front.lower():
+                return (f"Error: {front!r} had focus instead of WhatsApp, so "
+                        f"nothing was typed and no message was sent.")
+
             pyautogui.hotkey("ctrl", "f")
             time.sleep(0.5)
 

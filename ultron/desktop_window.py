@@ -167,4 +167,31 @@ def ensure_ready(launch, timeout: float = LAUNCH_TIMEOUT_SECONDS,
                       f"nothing was typed and no message was sent.")
 
     sleep(COLD_SETTLE_SECONDS if cold else WARM_SETTLE_SECONDS)
+
+    # The settle is the dangerous part. Focus was confirmed *before* it, and
+    # three seconds is long enough for the launching window to take focus
+    # back, for a notification to steal it, or for the user to alt-tab. This
+    # used to return "ready" on the strength of a check that was three
+    # seconds stale, and the caller's first keystroke went wherever focus had
+    # since moved.
+    #
+    # So the check is repeated after the wait, and losing focus is not
+    # automatically fatal: an app that raises itself late is normal, and one
+    # more attempt costs nothing compared to refusing to send.
+    if not _still_in_front(window, title_of):
+        if not focus(window, sleep=sleep, clock=clock, title_of=title_of):
+            front = (title_of or foreground_title)()
+            return None, (f"WhatsApp lost focus to {front!r} while it was "
+                          f"loading, so nothing was typed and no message "
+                          f"was sent.")
+
     return window, None
+
+
+def _still_in_front(window, title_of=None) -> bool:
+    """True when *window* is the one that would receive a keystroke now."""
+    wanted = (getattr(window, "title", "") or "").strip().lower()
+    if not wanted:
+        return False
+    front = ((title_of or foreground_title)() or "").strip().lower()
+    return front == wanted

@@ -7,7 +7,9 @@ screenshots/
 credentials.json
 token.json
 usage.json
-keys.json
+# keys.json* rather than keys.json: a .bak or .old left beside it during an
+# edit is the same secret, and the bare name would not have covered it.
+keys.json*
 # User config (settings.default.json is the tracked template)
 settings.json
 

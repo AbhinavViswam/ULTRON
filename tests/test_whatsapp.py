@@ -181,6 +181,75 @@ class TestTheGateAsAWhole:
             "knowing what stole focus is how this gets diagnosed")
 
 
+class TestFocusLostDuringTheSettle:
+    """The gap this missed for real, on the user's machine.
+
+    ensure_ready confirmed focus, slept three seconds to let a cold WhatsApp
+    finish loading, and then reported ready -- on the strength of a check
+    that was by then three seconds stale. Observed live: it returned
+    (window, None) while the IDE actually held focus, so the caller's first
+    keystroke went into an editor.
+
+    Three seconds is ample for the launching window to take focus back, for
+    a notification to steal it, or for the user to alt-tab.
+    """
+
+    def _lost_after(self, seconds, clock, regains=False):
+        """A foreground that is WhatsApp, then something else."""
+        start = clock.read()
+
+        def title():
+            if clock.read() - start < seconds:
+                return "WhatsApp"
+            return "WhatsApp" if regains else "Visual Studio Code"
+
+        return title
+
+    def test_focus_lost_while_loading_is_caught(self):
+        clock = Clock()
+        window, problem = ww.ensure_ready(
+            lambda: None, finder=lambda: FakeWindow(),
+            sleep=clock.sleep, clock=clock.read,
+            title_of=self._lost_after(0.2, clock))
+
+        assert window is None, "it reported ready with another window in front"
+        assert "no message was sent" in problem
+
+    def test_the_thief_is_named(self):
+        """Knowing what took focus is how this gets diagnosed at all."""
+        clock = Clock()
+        _window, problem = ww.ensure_ready(
+            lambda: None, finder=lambda: FakeWindow(),
+            sleep=clock.sleep, clock=clock.read,
+            title_of=self._lost_after(0.2, clock))
+
+        assert "Visual Studio Code" in problem
+
+    def test_an_app_that_raises_itself_late_is_not_refused(self):
+        """WhatsApp coming to the front a moment after being asked is normal.
+        Refusing outright would trade a wrong-window bug for a tool that
+        rarely works."""
+        clock = Clock()
+        start = clock.read()
+
+        def title():
+            return "Other" if clock.read() - start < 1.0 else "WhatsApp"
+
+        window, problem = ww.ensure_ready(
+            lambda: None, finder=lambda: FakeWindow(),
+            sleep=clock.sleep, clock=clock.read, title_of=title)
+
+        assert problem is None and window is not None
+
+    def test_focus_held_throughout_still_succeeds(self):
+        clock = Clock()
+        window, problem = ww.ensure_ready(
+            lambda: None, finder=lambda: FakeWindow(),
+            sleep=clock.sleep, clock=clock.read, title_of=lambda: "WhatsApp")
+
+        assert problem is None and window is not None
+
+
 class TestTheToolItself:
     """Driven with fakes: no window is opened and no key is pressed."""
 
