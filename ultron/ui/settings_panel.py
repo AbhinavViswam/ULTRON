@@ -144,11 +144,23 @@ class SettingsPanel(QWidget):
         self.google_key.setPlaceholderText("AIza...")
         keys_form.addRow("Google", self.google_key)
 
+        # Groq has been selectable as a provider with no way to enter its key
+        # here, so it could only be configured by hand-editing keys.json.
+        self.groq_key = QLineEdit()
+        self.groq_key.setEchoMode(QLineEdit.Password)
+        self.groq_key.setPlaceholderText("gsk_...")
+        keys_form.addRow("Groq", self.groq_key)
+
         form.addLayout(keys_form)
 
         self.reveal_keys = QCheckBox("Show keys")
         self.reveal_keys.toggled.connect(self._on_reveal_toggled)
         form.addWidget(self.reveal_keys)
+
+        self.spare_keys_label = QLabel("")
+        self.spare_keys_label.setObjectName("hint")
+        self.spare_keys_label.setWordWrap(True)
+        form.addWidget(self.spare_keys_label)
 
         keys_hint = QLabel("Stored in keys.json, which is gitignored.")
         keys_hint.setObjectName("hint")
@@ -300,6 +312,8 @@ class SettingsPanel(QWidget):
 
         self.openrouter_key.setText(config.get_key("openrouter"))
         self.google_key.setText(config.get_key("google"))
+        self.groq_key.setText(config.get_key("groq"))
+        self._show_spare_keys()
 
         self.mic_check.setChecked(bool(config.get("microphone_active", True)))
         self.truth_check.setChecked(bool(config.get("truth_mode", False)))
@@ -332,6 +346,27 @@ class SettingsPanel(QWidget):
         self._refresh_gmail_status()
         self._refresh_banner()
 
+    def _show_spare_keys(self):
+        """Says when a provider holds keys this form is not showing.
+
+        The field shows the first key only. Someone holding three would
+        otherwise see one, reasonably conclude the others were lost, and
+        paste them in again.
+        """
+        extra = []
+        for label, name in (("OpenRouter", "openrouter"), ("Google", "google"),
+                            ("Groq", "groq")):
+            spare = len(config.get_keys(name)) - 1
+            if spare > 0:
+                extra.append(f"{label} +{spare}")
+        if extra:
+            self.spare_keys_label.setText(
+                "Extra keys in keys.json, used automatically when the first "
+                "is rate limited: " + ", ".join(extra) +
+                ". Editing the field above leaves them untouched.")
+        else:
+            self.spare_keys_label.setText("")
+
     def save(self):
         """Writes every field back to settings.json and keys.json."""
         provider = self.provider_combo.currentData()
@@ -354,8 +389,11 @@ class SettingsPanel(QWidget):
         updates["agent_monitor.port"] = self.port_spin.value()
 
         config.update(updates)
+        # set_key keeps any spare keys behind the first, so saving a form
+        # that only ever showed one of them does not delete the rest.
         config.set_key("openrouter", self.openrouter_key.text())
         config.set_key("google", self.google_key.text())
+        config.set_key("groq", self.groq_key.text())
 
         self._refresh_banner()
         self._flash("Saved.")
@@ -392,6 +430,7 @@ class SettingsPanel(QWidget):
         mode = QLineEdit.Normal if shown else QLineEdit.Password
         self.openrouter_key.setEchoMode(mode)
         self.google_key.setEchoMode(mode)
+        self.groq_key.setEchoMode(mode)
 
     def _refresh_banner(self):
         problems = config.missing_requirements()

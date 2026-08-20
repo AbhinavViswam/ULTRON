@@ -195,15 +195,78 @@ class Config:
     # ------------------------------------------------------------------
 
     def get_key(self, name: str) -> str:
-        """Returns an API key from keys.json, or "" if unset."""
+        """Returns an API key from keys.json, or "" if unset.
+
+        When several keys are stored for a provider this is the first one.
+        Callers that can rotate should use get_keys() instead.
+        """
+        keys = self.get_keys(name)
+        return keys[0] if keys else ""
+
+    def get_keys(self, name: str) -> list:
+        """Every API key stored under *name*, in order, blanks removed.
+
+        A provider may hold one key or several. Several only helps when they
+        come from separate accounts -- keys on one account share that
+        account's quota, so rotating between them rotates nothing.
+
+            "groq": "gsk_one"                  -> ["gsk_one"]
+            "groq": ["gsk_one", "gsk_two"]     -> ["gsk_one", "gsk_two"]
+
+        The plain string is what every install has today and stays valid;
+        nothing needs migrating.
+        """
         self._maybe_reload()
         with self._lock:
-            return (self._keys.get(name) or "").strip()
+            raw = self._keys.get(name)
+
+        if isinstance(raw, str):
+            raw = [raw]
+        elif not isinstance(raw, (list, tuple)):
+            # A number, a dict, None -- nothing usable as a credential.
+            return []
+
+        seen, keys = set(), []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            # A duplicate is one account listed twice: it would look like a
+            # spare key and then rate limit at the same moment as the first.
+            if value and value not in seen:
+                seen.add(value)
+                keys.append(value)
+        return keys
 
     def set_key(self, name: str, value: str):
-        """Stores an API key in keys.json."""
+        """Stores an API key in keys.json.
+
+        A settings form shows one key per provider -- the first -- and saves
+        every field back whether or not it was touched. Writing a bare string
+        there would delete the spare keys of anyone holding several, without
+        saying so and without a copy anywhere. So an unchanged first key
+        leaves the stored list exactly as it was.
+        """
+        value = (value or "").strip()
         with self._lock:
-            self._keys[name] = (value or "").strip()
+            existing = self._keys.get(name)
+            if isinstance(existing, (list, tuple)) and len(existing) > 1:
+                current = self.get_keys(name)
+                if current and value == current[0]:
+                    return
+                # Genuinely replacing the first key: keep the others.
+                self._keys[name] = ([value] + current[1:]) if value else current[1:]
+            else:
+                self._keys[name] = value
+            _write_json(KEYS_PATH, self._keys)
+        self.reload()
+
+    def set_keys(self, name: str, values: list):
+        """Replaces every key stored under *name*."""
+        with self._lock:
+            cleaned = [v.strip() for v in values
+                       if isinstance(v, str) and v.strip()]
+            self._keys[name] = cleaned if len(cleaned) != 1 else cleaned[0]
             _write_json(KEYS_PATH, self._keys)
         self.reload()
 

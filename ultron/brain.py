@@ -9,7 +9,7 @@ import threading
 from openai import OpenAI
 
 from ultron.config import config, PROVIDER_KEYS
-from ultron import tool_usage
+from ultron import api_keys, tool_usage
 from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
@@ -117,6 +117,15 @@ SCREEN_TOOLS = {
     "chrome_open",
     "chrome_read_page",
 }
+
+
+# --- Talking to the model ----------------------------------------------------
+
+# How many times one request may be sent before giving up. Rotating to a
+# different key does not spend one of these: a fresh account is not the
+# situation this budget exists for.
+API_ATTEMPTS = 3
+API_RETRY_SECONDS = 2
 
 
 # --- Tool watchdog -----------------------------------------------------------
@@ -560,34 +569,121 @@ class Brain:
         timeout = float(config.get("llm_timeout_seconds") or default_timeout)
 
         if provider == "localapi":
-            client = OpenAI(
-                base_url=config.get("local_api_url", "http://localhost:11434/v1"),
-                api_key="ollama",
-                timeout=timeout,
-                max_retries=1,
-            )
+            self.keyring = None
         elif provider in self.PROVIDER_BASE_URLS:
             key_name = PROVIDER_KEYS[provider]
-            api_key = config.get_key(key_name)
-            if not api_key:
+            self.keyring = api_keys.KeyRing(config.get_keys(key_name))
+            if not self.keyring.count:
                 raise ValueError(f"{key_name} API key is not set correctly in keys.json.")
-            client = OpenAI(
-                base_url=self.PROVIDER_BASE_URLS[provider],
-                api_key=api_key,
-                timeout=timeout,
-                max_retries=1,
-            )
         else:
             raise ValueError(f"Unsupported API selected in settings: {provider}")
 
+        self._timeout = timeout
         changed = getattr(self, "active_api", None) != provider or getattr(self, "selected_model", None) != model
         self.active_api = provider
         self.selected_model = model
-        self.client = client
+        self._build_client()
 
         if verbose or changed:
             print(f"\nUltron AI Provider: {self.PROVIDER_LABELS[provider]} Mode")
             print(f"Selected Model: {self.selected_model}")
+            if self.keyring is not None and self.keyring.count > 1:
+                print(f"API keys available: {self.keyring.count}")
+
+    def _build_client(self):
+        """Builds the SDK client around whichever key is current.
+
+        The key is baked into the client at construction, so switching keys
+        means building a new one. That is cheap -- it opens no connection.
+        """
+        if self.active_api == "localapi":
+            self.client = OpenAI(
+                base_url=config.get("local_api_url", "http://localhost:11434/v1"),
+                api_key="ollama",
+                timeout=self._timeout,
+                max_retries=1,
+            )
+            return
+
+        self.client = OpenAI(
+            base_url=self.PROVIDER_BASE_URLS[self.active_api],
+            api_key=self.keyring.current(),
+            timeout=self._timeout,
+            # 1, not 0: the SDK's own retry is for a dropped socket, which is
+            # not a key problem and should not cost a rotation.
+            max_retries=1,
+        )
+
+    def complete(self, **kwargs):
+        """Every request to the model goes through here.
+
+        Four copies of a retry loop used to live at the call sites, which
+        meant any change to how failures are handled had to be made four
+        times. It also meant key rotation had nowhere to go.
+
+        Two budgets run at once and they are deliberately separate. Attempts
+        cover transient trouble and cost a sleep each. Rotations cover a
+        spent or rejected key, cost nothing, and are limited by how many keys
+        there are -- otherwise three keys and three attempts would mean the
+        third key never actually got to send anything.
+        """
+        import time as _time
+
+        attempts = 0
+        rotations = 0
+        max_rotations = self.keyring.count if self.keyring is not None else 0
+        response = None
+
+        while True:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.selected_model, **kwargs)
+                if response and response.choices:
+                    self._record_usage(response)
+                    return response
+                error = None
+            except Exception as e:
+                error = e
+
+            if error is not None:
+                kind = api_keys.classify(error)
+
+                # A malformed request fails identically on every key. Raising
+                # now keeps the real reason in the message instead of burying
+                # it under "all keys exhausted".
+                if kind == api_keys.FATAL:
+                    raise error
+
+                if (kind in (api_keys.RATE_LIMIT, api_keys.AUTH)
+                        and self.keyring is not None
+                        and rotations < max_rotations):
+                    if kind == api_keys.AUTH:
+                        print(f"[Provider] {self.keyring.label()} was rejected")
+                        moved = self.keyring.rejected()
+                    else:
+                        wait = api_keys.retry_after(error)
+                        print(f"[Provider] {self.keyring.label()} is rate limited")
+                        moved = self.keyring.rate_limited(wait)
+
+                    if moved:
+                        rotations += 1
+                        self._build_client()
+                        print(f"[Provider] switching to {self.keyring.label()} "
+                              f"({self.keyring.status()})")
+                        # No sleep: a different account is not rate limited.
+                        continue
+
+                    print(f"[Provider] no other key is free "
+                          f"({self.keyring.status()})")
+
+            attempts += 1
+            if attempts >= API_ATTEMPTS:
+                if error is not None:
+                    raise error
+                # An empty response is not an exception. Handing it back lets
+                # each caller say its own thing about it, as it always did.
+                return response
+            _time.sleep(API_RETRY_SECONDS)
 
     def __init__(self):
         self.session_id = str(uuid.uuid4())
@@ -1104,7 +1200,8 @@ class Brain:
                 topic=topic,
                 client=self.client,
                 model=self.selected_model,
-                output_manager=om
+                output_manager=om,
+                complete=self.complete,
             )
 
         def run_workflow_tool(name: str) -> str:
@@ -2233,20 +2330,7 @@ Your response: Let me find some great Malayalam songs for you, sir.
 
             for _ in range(max_tool_rounds):
                 # Call local model WITHOUT tools/tool_choice params
-                for attempt in range(3):
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=self.selected_model,
-                            messages=messages_for_call,
-                        )
-                        if response and response.choices:
-                            self._record_usage(response)
-                            break
-                    except Exception as e:
-                        if attempt == 2:
-                            raise e
-                        import time
-                        time.sleep(2)
+                response = self.complete(messages=messages_for_call)
 
                 if not response or not response.choices:
                     return "The local AI model returned an empty response. Is Ollama running?"
@@ -2316,21 +2400,11 @@ Your response: Let me find some great Malayalam songs for you, sir.
             
             # Initial API call with retries
             t0 = _time.monotonic()
-            for attempt in range(3):
-                try:
-                    response = self.client.chat.completions.create(
-                        model=self.selected_model,
-                        messages=self.messages,
-                        tools=self.tools_schema,
-                        tool_choice="auto"
-                    )
-                    if response and response.choices:
-                        self._record_usage(response)
-                        break
-                except Exception as e:
-                    if attempt == 2:
-                        raise e
-                    _time.sleep(2)
+            response = self.complete(
+                messages=self.messages,
+                tools=self.tools_schema,
+                tool_choice="auto",
+            )
             
             print(f"[Timing] Model API call #1: {_time.monotonic() - t0:.1f}s")
             
@@ -2369,21 +2443,11 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 
                 # Call the model again with the newly added tool results (with retries)
                 t2 = _time.monotonic()
-                for attempt in range(3):
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=self.selected_model,
-                            messages=self.messages,
-                            tools=self.tools_schema,
-                            tool_choice="auto"
-                        )
-                        if response and response.choices:
-                            self._record_usage(response)
-                            break
-                    except Exception as e:
-                        if attempt == 2:
-                            raise e
-                        _time.sleep(2)
+                response = self.complete(
+                    messages=self.messages,
+                    tools=self.tools_schema,
+                    tool_choice="auto",
+                )
                 
                 print(f"[Timing] Model API call #{tool_round + 1}: {_time.monotonic() - t2:.1f}s")
                 

@@ -231,7 +231,8 @@ def list_research_reports() -> str:
 # 5. Background Research Task Worker
 # ---------------------------------------------------------------------------
 
-def run_background_research_task(topic: str, client, model: str, output_manager=None) -> str:
+def run_background_research_task(topic: str, client=None, model: str = None,
+                                output_manager=None, complete=None) -> str:
     """Helper that runs in a background thread to search, fetch, synthesize, and save a research report.
     Once complete, it announces that research is finished and saved as a .md file without reading the whole text out loud.
     """
@@ -272,13 +273,18 @@ def run_background_research_task(topic: str, client, model: str, output_manager=
             import time
             for attempt in range(3):
                 try:
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": sys_msg},
-                            {"role": "user", "content": prompt}
-                        ]
-                    )
+                    messages = [
+                        {"role": "system", "content": sys_msg},
+                        {"role": "user", "content": prompt}
+                    ]
+                    # `complete` is the Brain's own path, so a report started
+                    # before a key ran out still finishes on the next key.
+                    # The client argument stays for any caller without one.
+                    if complete is not None:
+                        response = complete(messages=messages)
+                    else:
+                        response = client.chat.completions.create(
+                            model=model, messages=messages)
                     if response and getattr(response, "choices", None) and len(response.choices) > 0:
                         choice = response.choices[0]
                         if choice and getattr(choice, "message", None) and choice.message.content:

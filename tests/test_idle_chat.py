@@ -97,15 +97,16 @@ class TestComposing:
                 )]
             )
 
+        # complete() rather than the raw client: idle chat goes through the
+        # Brain's own request path, so it retries and rotates API keys like
+        # everything else.
         return types.SimpleNamespace(
-            client=types.SimpleNamespace(
-                chat=types.SimpleNamespace(
-                    completions=types.SimpleNamespace(create=create)
-                )
-            ),
+            complete=create,
             selected_model="test",
             _record_usage=lambda r: None,
-            db=types.SimpleNamespace(list_memories=lambda: [], get_pending_tasks=lambda: []),
+            db=types.SimpleNamespace(list_memories=lambda: [],
+                                     get_pending_tasks=lambda: [],
+                                     list_todos=lambda **kw: []),
         )
 
     def test_a_good_line_is_used(self):
@@ -213,9 +214,7 @@ class TestOffersAreDeliverable:
             captured["prompt"] = kwargs["messages"][0]["content"]
             raise OSError("stop here")
 
-        monkeypatch.setattr(brain, "client", types.SimpleNamespace(
-            chat=types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=create))))
+        monkeypatch.setattr(brain, "complete", create)
         idle_chat.compose(brain, 25)
         # The rules legitimately say "do not say there is nothing scheduled",
         # so check the context slot rather than the whole prompt.

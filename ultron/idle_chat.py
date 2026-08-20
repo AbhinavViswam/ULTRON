@@ -324,11 +324,8 @@ def compose(brain, idle_minutes: int) -> str:
     )
 
     try:
-        response = brain.client.chat.completions.create(
-            model=brain.selected_model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        brain._record_usage(response)
+        response = brain.complete(
+            messages=[{"role": "user", "content": prompt}])
         text = (response.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[Idle] could not compose a line ({e}) — using a plain one")
