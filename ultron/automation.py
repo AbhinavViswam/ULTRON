@@ -916,7 +916,7 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         import pyautogui
         import pyperclip
 
-        from ultron import whatsapp_window
+        from ultron import desktop_window
 
         contact_name = (contact_name or "").strip()
         message = (message or "").strip()
@@ -930,7 +930,7 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         # cold start the keystrokes went to whatever window had focus, which
         # meant the message text was typed into someone else's document and
         # Enter pressed after it.
-        window, problem = whatsapp_window.ensure_ready(
+        window, problem = desktop_window.ensure_ready(
             lambda: open_application("whatsapp"))
         if problem:
             return f"Error: {problem}"
@@ -955,7 +955,7 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
             # Focus can still be lost between opening the chat and typing -
             # a notification, an alt-tab, the user clicking elsewhere. This
             # is the last moment before the message itself is typed.
-            front = whatsapp_window.foreground_title().strip()
+            front = desktop_window.foreground_title().strip()
             if "whatsapp" not in front.lower():
                 # Reported as the window actually names itself, not as the
                 # lowercased string used for the comparison.
@@ -988,6 +988,124 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         return f"Failed to send WhatsApp message: {e}"
     finally:
         _release_quietly()
+
+
+# The title of the tab Ultron last worked in. Chrome exposes no tab handles
+# to anything outside itself, so a name is the only identity available.
+_ultron_tab_title = None
+
+
+def _chrome_ready():
+    """Chrome open and focused, or a reason it is not."""
+    from ultron import chrome, desktop_window
+
+    window, problem = chrome.ensure_chrome(
+        lambda: open_application("chrome"))
+    if problem:
+        return None, problem
+    return window, None
+
+
+def _chrome_work_tab(reuse: bool = True):
+    """Puts Ultron in a tab it may safely type into.
+
+    Reuses the tab it opened last time when that tab is still findable, so a
+    second search continues where the first left off instead of littering
+    the window. Otherwise a new tab, because typing into the user's current
+    tab navigates away from whatever they were reading.
+    """
+    import pyautogui
+    from ultron import chrome
+
+    global _ultron_tab_title
+
+    if reuse and _ultron_tab_title and chrome.find_tab(
+            _ultron_tab_title, pyautogui.hotkey):
+        return "continued in the tab I opened earlier"
+
+    chrome.open_tab(pyautogui.hotkey)
+    return "opened a new tab"
+
+
+def chrome_search(query: str) -> str:
+    """Searches the web in the user's own Chrome and reads the results page. Use when the user wants a search done in their browser, or asks to see the results themselves.
+
+    Args:
+        query: What to search for.
+    """
+    return _chrome_go(query, what=f"search for '{query}'")
+
+
+def chrome_open(url: str) -> str:
+    """Opens a URL in the user's own Chrome and reads the page. Use for "open example.com", "go to that site and tell me what it says".
+
+    Args:
+        url: The address to open.
+    """
+    return _chrome_go(url, what=f"open {url}")
+
+
+def _chrome_go(text: str, what: str) -> str:
+    """Shared path: focus Chrome, get a tab, navigate, read what arrived."""
+    try:
+        import pyautogui
+        from ultron import chrome
+
+        global _ultron_tab_title
+
+        text = (text or "").strip()
+        if not text:
+            return "Error: nothing to search for or open, so Chrome was left alone."
+
+        window, problem = _chrome_ready()
+        if problem:
+            return f"Error: {problem}"
+
+        tab_note = _chrome_work_tab()
+        chrome.go_to(text, pyautogui.hotkey, pyautogui.write)
+
+        title = chrome.wait_for_page(title_of=None)
+        if not chrome.is_chrome_in_front():
+            return (f"Error: focus left Chrome while trying to {what}, so the "
+                    f"page was not read. Nothing else was typed.")
+
+        _ultron_tab_title = title
+        body = chrome.read_page(pyautogui.hotkey)
+        if not body:
+            return (f"I {tab_note} and did {what}, but could not copy any text "
+                    f"from the page - it may still be loading, or it may draw "
+                    f"itself in a way that cannot be selected. The tab is open "
+                    f"on '{title}' if you want to look.")
+
+        return (f"I {tab_note} and did {what}. The page is '{title}'.\n\n"
+                f"{body[:4000]}")
+    except Exception as e:
+        return f"Failed to drive Chrome: {e}"
+    finally:
+        _release_quietly()
+
+
+def chrome_read_page() -> str:
+    """Reads the text of whatever page is currently open in the user's Chrome. Use for "what does this page say", "read this to me"."""
+    try:
+        import pyautogui
+        from ultron import chrome
+
+        window, problem = _chrome_ready()
+        if problem:
+            return f"Error: {problem}"
+
+        title = chrome.wait_for_page(title_of=None, timeout=3.0)
+        body = chrome.read_page(pyautogui.hotkey)
+        if not body:
+            return (f"Chrome is showing '{title}' but no text could be copied "
+                    f"from it.")
+        return f"The page '{title}' says:\n\n{body[:4000]}"
+    except Exception as e:
+        return f"Failed to read the page: {e}"
+    finally:
+        _release_quietly()
+
 
 def read_clipboard() -> str:
     """Reads and returns text currently copied to the Windows Clipboard."""

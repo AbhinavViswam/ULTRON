@@ -12,7 +12,7 @@ nothing touches the real keyboard.
 
 import pytest
 
-from ultron import whatsapp_window as ww
+from ultron import desktop_window as ww
 
 
 class FakeWindow:

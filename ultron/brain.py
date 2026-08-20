@@ -15,6 +15,7 @@ from ultron.automation import (
     open_application, close_application, system_media_control,
     search_spotify, adjust_volume, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
+    chrome_search, chrome_open, chrome_read_page,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
     copy_file, move_file, release_stuck_keys
@@ -97,6 +98,24 @@ DESTRUCTIVE_TOOLS = {
     ),
     "delete_workflow": lambda args: f"delete the workflow '{args.get('name', '?')}'",
     "delete_routine": lambda args: f"delete the routine '{args.get('name', '?')}'",
+}
+
+
+# Tools that take over the keyboard and mouse.
+#
+# These drive real applications by pressing keys, which means the keystrokes
+# go wherever focus is. That is fine when someone asked for it a second ago
+# and is watching. It is not fine at 9am inside a scheduled routine, where it
+# would type into whatever the user happens to be working in.
+#
+# Distinct from DESTRUCTIVE_TOOLS: nothing here is unrecoverable, but all of
+# it is disruptive, and unattended was only ever guarding the former.
+SCREEN_TOOLS = {
+    "send_whatsapp_message",
+    "write_in_notepad",
+    "chrome_search",
+    "chrome_open",
+    "chrome_read_page",
 }
 
 
@@ -290,6 +309,10 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
     # Full browser automation
     "browser": [
+        # Drive the user's own Chrome by keyboard. Preferred over the
+        # browser_* tools below, which launch a second Chromium against a
+        # separate profile with none of their logins.
+        "chrome_search", "chrome_open", "chrome_read_page",
         "browser_navigate", "browser_read_page", "browser_click",
         "browser_type_text", "browser_press_key", "browser_go_back",
         "browser_go_forward", "browser_new_tab", "browser_switch_tab",
@@ -1175,6 +1198,9 @@ class Brain:
             "read_document": read_document,
             # ── Communication ─────────────────────────────────────────────
             "send_whatsapp_message": send_whatsapp_message,
+            "chrome_search": chrome_search,
+            "chrome_open": chrome_open,
+            "chrome_read_page": chrome_read_page,
             "read_emails": read_emails,
             "send_email": send_email,
             "draft_email": draft_email,
@@ -2054,6 +2080,13 @@ Your response: Let me find some great Malayalam songs for you, sir.
         # Logged so unexpected behaviour can be traced to the tool that caused
         # it. With the GUI there is no console, so this lands in ultron.log.
         print(f"[Tool] {func_name}({clean_args})")
+
+        if self.unattended and func_name in SCREEN_TOOLS:
+            print(f"[Screen] {func_name} refused - running unattended")
+            return (f"Error: {func_name} drives the keyboard and mouse, so it "
+                    f"cannot run inside a scheduled routine - it would type "
+                    f"into whatever the user is working in. Report what you "
+                    f"found and let them run it themselves.")
 
         refusal = self._check_confirmation(func_name, clean_args)
         if refusal:

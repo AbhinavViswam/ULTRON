@@ -1,21 +1,18 @@
-"""Knowing whether WhatsApp Desktop is actually ready to be typed into.
+"""Knowing that a window is really in front before typing into it.
 
-The old code launched WhatsApp, slept three seconds, and then began pressing
-keys. Three seconds is a guess, and on a cold start -- or on a machine busy
-running a local model -- WhatsApp is still showing its splash screen and
-loading chats when the guess expires.
-
-What happens then is the problem. The keystrokes are not queued for WhatsApp;
-they go to whatever window has focus. Ctrl+F, paste, Enter, paste, Enter,
-into a document, a browser, a terminal. The message text is typed somewhere
-it was never meant to go, and Enter is pressed twice.
+Written for WhatsApp and kept general, because the failure it prevents is not
+WhatsApp's. Any code that drives an application by pressing keys has the same
+problem: keystrokes are not addressed to a program, they go wherever focus
+is. Sleep for a fixed guess and start typing, and on a slow launch the text
+lands in a document, a browser, a terminal -- with Enter pressed after it.
 
 So nothing here sleeps and hopes. It waits for a real window, brings it to
-the front, and confirms that it actually arrived there. Every step can fail,
-and a failure means "do not type", which is the whole point.
+the front, and confirms it arrived. Every step can fail, and a failure means
+"do not type", which is the whole point.
 
-The window lookup is injectable so this can be tested without WhatsApp
-installed and without stealing focus from whoever is running the tests.
+The window lookup and the clock are injectable so this can be tested without
+the application installed and without stealing focus from whoever is running
+the tests.
 """
 
 import ctypes

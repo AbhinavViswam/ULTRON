@@ -431,6 +431,16 @@ class UltronCore:
         return ignored
 
     def _on_tool_event(self, phase: str, name: str, _detail=None):
+        from ultron.brain import SCREEN_TOOLS
+
+        if phase == "start" and name in SCREEN_TOOLS:
+            # Warned before the keys start flying, not reported afterwards.
+            # Anything typed while the user is still using the keyboard ends
+            # up interleaved with what they were doing.
+            self.output_manager.enqueue(
+                "Hands off the keyboard and mouse for a moment, sir.",
+                source="system")
+
         self._active_tool = name if phase == "start" else None
         self._recompute_state()
 
