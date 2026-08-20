@@ -89,6 +89,35 @@ def _read_docx(file_path: str, page: int = None) -> str:
             return (f"The DOCX document '{os.path.basename(file_path)}' is long (divided into {num_chunks} chunks). "
                     f"To read it, please call the tool again and provide a specific page number, e.g., page=1.")
 
+# Where Tesseract ends up on Windows. The installer does not put it on PATH,
+# and pytesseract only looks there — so a perfectly good installation reports
+# itself as missing.
+TESSERACT_LOCATIONS = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                 "Programs", "Tesseract-OCR", "tesseract.exe"),
+]
+
+
+def find_tesseract() -> str:
+    """The Tesseract executable, or "" if there is genuinely none.
+
+    PATH first, so a deliberate choice of build wins, then the usual install
+    locations. Looking these up costs nothing and saves the user editing
+    environment variables to make a feature work that is already installed.
+    """
+    import shutil
+
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    for candidate in TESSERACT_LOCATIONS:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 def _read_image(file_path: str) -> str:
     """Extract text from an image file using Tesseract OCR."""
     try:
@@ -96,6 +125,13 @@ def _read_image(file_path: str) -> str:
         from PIL import Image
     except ImportError:
         return "Error: pytesseract or Pillow is not installed. Please run: pip install pytesseract pillow"
+
+    executable = find_tesseract()
+    if not executable:
+        return ("Error: Tesseract OCR is not installed, so I cannot read text "
+                "out of an image. Install it with: "
+                "winget install UB-Mannheim.TesseractOCR")
+    pytesseract.pytesseract.tesseract_cmd = executable
 
     img = Image.open(file_path)
     text = pytesseract.image_to_string(img)

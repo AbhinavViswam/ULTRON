@@ -19,6 +19,7 @@ from ultron.core import STATE_IDLE, STATE_TOOL
 from ultron.ui import theme
 from ultron.ui.cards import CardStack, ConfirmCard, InputCard
 from ultron.ui.orb import Orb, OrbLabel
+from ultron.ui.routines_window import RoutinesWindow
 from ultron.ui.settings_window import SettingsWindow
 
 SCREEN_MARGIN = 34
@@ -33,6 +34,7 @@ SOURCE_ROLES = {
     "reminder": "reminder",
     "cron": "scheduled",
     "idle": "ultron",
+    "routine": "scheduled",
     "system": "system",
     "status": "system",
 }
@@ -71,6 +73,13 @@ class OrbOverlay(QWidget):
         self.input_card.submitted.connect(self._on_submitted)
         self.settings_window = SettingsWindow()
         self.settings_window.settings_saved.connect(self._on_settings_saved)
+        # Built with callables rather than the core itself: the window exists
+        # before the core has finished booting, and routines have to survive
+        # being opened in that gap.
+        self.routines_window = RoutinesWindow(
+            lambda: self.core.brain.db if self.core else None,
+            self._run_routine_now,
+        )
 
         self._connect_signals()
         self._restore_position()
@@ -263,6 +272,10 @@ class OrbOverlay(QWidget):
         hide_action.triggered.connect(self.hide)
         self.menu.addAction(hide_action)
 
+        routines_action = QAction("Routines", self)
+        routines_action.triggered.connect(self._show_routines)
+        self.menu.addAction(routines_action)
+
         settings_action = QAction("Settings", self)
         settings_action.triggered.connect(self._show_settings)
         self.menu.addAction(settings_action)
@@ -323,6 +336,14 @@ class OrbOverlay(QWidget):
 
     def _show_settings(self):
         self.settings_window.show_panel()
+
+    def _show_routines(self):
+        self.routines_window.show_panel()
+
+    def _run_routine_now(self, name: str):
+        """Queues a routine, the same way asking for it out loud would."""
+        if self.core:
+            self.core.brain._invoke_tool("run_routine_now", {"name": name})
 
     # ------------------------------------------------------------------
     # Core wiring
@@ -465,6 +486,7 @@ class OrbOverlay(QWidget):
         self.cards.close_all()
         self.input_card.close()
         self.settings_window.close()
+        self.routines_window.close()
         if self.core:
             self.core.shutdown()
         self.tray.hide()

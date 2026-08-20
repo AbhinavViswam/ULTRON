@@ -434,7 +434,7 @@ def close_application(app_name: str) -> str:
         return f"Failed to close {app_name}. Error: {e}"
 
 def search_spotify(query: str) -> str:
-    """Searches Spotify for an artist, song, or album and opens it in the desktop app.
+    """Opens Spotify's search results for an artist, song or album. Does NOT start playing anything — the results are shown and the user picks one.
     Args:
         query: The search term (e.g., 'Justin Bieber', 'lofi beats').
     """
@@ -444,7 +444,12 @@ def search_spotify(query: str) -> str:
         # Construct the official Spotify URI for searching
         command = f'start spotify:search:{query_encoded}'
         subprocess.Popen(command, shell=True)
-        return f"Successfully opened Spotify and searched for '{query}'."
+        # Spelled out, because the tool name reads like it plays something and
+        # the model filled in the rest: it was reporting "playback should begin
+        # shortly" over a search page that was sitting there doing nothing.
+        return (f"Opened Spotify's search results for '{query}'. NOTHING IS "
+                f"PLAYING — this only shows a list of results. Tell the user "
+                f"to pick one; do not say otherwise.")
     except Exception as e:
         return f"Failed to search Spotify. Error: {e}"
 
@@ -910,33 +915,206 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
         import time
         import pyautogui
         import pyperclip
-        
-        # Launch WhatsApp application
-        open_application("whatsapp")
-        time.sleep(3.0)  # Wait for WhatsApp window to open
-        
-        # Focus search bar (Ctrl+F in WhatsApp)
-        pyautogui.hotkey('ctrl', 'f')
-        time.sleep(0.5)
-        
-        # Type contact name
-        pyperclip.copy(contact_name)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(1.5)
-        pyautogui.press('enter')  # Open chat
-        time.sleep(1.0)
-        
-        # Type message
-        pyperclip.copy(message)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(0.5)
-        pyautogui.press('enter')  # Send message
-        
-        return f"Successfully sent WhatsApp message to '{contact_name}': '{message}'"
+
+        from ultron import desktop_window
+
+        contact_name = (contact_name or "").strip()
+        message = (message or "").strip()
+        if not contact_name:
+            return "Error: no contact name was given, so nothing was sent."
+        if not message:
+            return "Error: the message was empty, so nothing was sent."
+
+        # Nothing is typed until WhatsApp is genuinely in front. Previously
+        # this slept three seconds and started pressing keys regardless; on a
+        # cold start the keystrokes went to whatever window had focus, which
+        # meant the message text was typed into someone else's document and
+        # Enter pressed after it.
+        window, problem = desktop_window.ensure_ready(
+            lambda: open_application("whatsapp"))
+        if problem:
+            return f"Error: {problem}"
+
+        # The clipboard belongs to the user. Two pastes used to overwrite
+        # whatever they had copied and never give it back.
+        try:
+            saved_clipboard = pyperclip.paste()
+        except Exception:
+            saved_clipboard = None
+
+        try:
+            # Checked immediately before the *first* keystroke, not only
+            # before the message. Ctrl+F, a pasted contact name and Enter
+            # sent into an editor is its own small disaster, and the guard
+            # further down would only have caught it afterwards.
+            front = desktop_window.foreground_title().strip()
+            if "whatsapp" not in front.lower():
+                return (f"Error: {front!r} had focus instead of WhatsApp, so "
+                        f"nothing was typed and no message was sent.")
+
+            pyautogui.hotkey("ctrl", "f")
+            time.sleep(0.5)
+
+            pyperclip.copy(contact_name)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(1.5)
+            pyautogui.press("enter")      # open the highlighted chat
+            time.sleep(1.0)
+
+            # Focus can still be lost between opening the chat and typing -
+            # a notification, an alt-tab, the user clicking elsewhere. This
+            # is the last moment before the message itself is typed.
+            front = desktop_window.foreground_title().strip()
+            if "whatsapp" not in front.lower():
+                # Reported as the window actually names itself, not as the
+                # lowercased string used for the comparison.
+                return (f"Error: focus moved to {front!r} while opening the "
+                        f"chat, so the message was not typed or sent.")
+
+            pyperclip.copy(message)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.5)
+            pyautogui.press("enter")
+        finally:
+            if saved_clipboard is not None:
+                try:
+                    pyperclip.copy(saved_clipboard)
+                except Exception:
+                    # Restoring the clipboard is a courtesy, not the job. If
+                    # it fails, the message has already been sent and saying
+                    # so matters more than reporting a failed paste.
+                    pass
+
+        # Deliberately not "successfully sent". WhatsApp was open, focused,
+        # and received the keystrokes - that is what was actually observed.
+        # Which chat was highlighted by the search is not checked here, so
+        # claiming delivery to a named person would be asserting more than is
+        # known.
+        return (f"Typed the message into WhatsApp and pressed send for "
+                f"'{contact_name}'. Please check it went to the right chat: "
+                f"'{message}'")
     except Exception as e:
         return f"Failed to send WhatsApp message: {e}"
     finally:
         _release_quietly()
+
+
+# The title of the tab Ultron last worked in. Chrome exposes no tab handles
+# to anything outside itself, so a name is the only identity available.
+_ultron_tab_title = None
+
+
+def _chrome_ready():
+    """Chrome open and focused, or a reason it is not."""
+    from ultron import chrome, desktop_window
+
+    window, problem = chrome.ensure_chrome(
+        lambda: open_application("chrome"))
+    if problem:
+        return None, problem
+    return window, None
+
+
+def _chrome_work_tab(reuse: bool = True):
+    """Puts Ultron in a tab it may safely type into.
+
+    Reuses the tab it opened last time when that tab is still findable, so a
+    second search continues where the first left off instead of littering
+    the window. Otherwise a new tab, because typing into the user's current
+    tab navigates away from whatever they were reading.
+    """
+    import pyautogui
+    from ultron import chrome
+
+    global _ultron_tab_title
+
+    if reuse and _ultron_tab_title and chrome.find_tab(
+            _ultron_tab_title, pyautogui.hotkey):
+        return "continued in the tab I opened earlier"
+
+    chrome.open_tab(pyautogui.hotkey)
+    return "opened a new tab"
+
+
+def chrome_search(query: str) -> str:
+    """Searches the web in the user's own Chrome and reads the results page. Use when the user wants a search done in their browser, or asks to see the results themselves.
+
+    Args:
+        query: What to search for.
+    """
+    return _chrome_go(query, what=f"search for '{query}'")
+
+
+def chrome_open(url: str) -> str:
+    """Opens a URL in the user's own Chrome and reads the page. Use for "open example.com", "go to that site and tell me what it says".
+
+    Args:
+        url: The address to open.
+    """
+    return _chrome_go(url, what=f"open {url}")
+
+
+def _chrome_go(text: str, what: str) -> str:
+    """Shared path: focus Chrome, get a tab, navigate, read what arrived."""
+    try:
+        import pyautogui
+        from ultron import chrome
+
+        global _ultron_tab_title
+
+        text = (text or "").strip()
+        if not text:
+            return "Error: nothing to search for or open, so Chrome was left alone."
+
+        window, problem = _chrome_ready()
+        if problem:
+            return f"Error: {problem}"
+
+        tab_note = _chrome_work_tab()
+        chrome.go_to(text, pyautogui.hotkey, pyautogui.write)
+
+        title = chrome.wait_for_page(title_of=None)
+        if not chrome.is_chrome_in_front():
+            return (f"Error: focus left Chrome while trying to {what}, so the "
+                    f"page was not read. Nothing else was typed.")
+
+        _ultron_tab_title = title
+        body = chrome.read_page(pyautogui.hotkey)
+        if not body:
+            return (f"I {tab_note} and did {what}, but could not copy any text "
+                    f"from the page - it may still be loading, or it may draw "
+                    f"itself in a way that cannot be selected. The tab is open "
+                    f"on '{title}' if you want to look.")
+
+        return (f"I {tab_note} and did {what}. The page is '{title}'.\n\n"
+                f"{body[:4000]}")
+    except Exception as e:
+        return f"Failed to drive Chrome: {e}"
+    finally:
+        _release_quietly()
+
+
+def chrome_read_page() -> str:
+    """Reads the text of whatever page is currently open in the user's Chrome. Use for "what does this page say", "read this to me"."""
+    try:
+        import pyautogui
+        from ultron import chrome
+
+        window, problem = _chrome_ready()
+        if problem:
+            return f"Error: {problem}"
+
+        title = chrome.wait_for_page(title_of=None, timeout=3.0)
+        body = chrome.read_page(pyautogui.hotkey)
+        if not body:
+            return (f"Chrome is showing '{title}' but no text could be copied "
+                    f"from it.")
+        return f"The page '{title}' says:\n\n{body[:4000]}"
+    except Exception as e:
+        return f"Failed to read the page: {e}"
+    finally:
+        _release_quietly()
+
 
 def read_clipboard() -> str:
     """Reads and returns text currently copied to the Windows Clipboard."""

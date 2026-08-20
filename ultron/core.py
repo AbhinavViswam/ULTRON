@@ -26,10 +26,11 @@ import random
 import threading
 import time
 
-from ultron.config import config
+from ultron.config import config, DATA_DIR
 from ultron.brain import Brain
 from ultron.speaker import VoiceSpeaker
 from ultron.listener import VoiceListener
+from ultron.self_hearing import SelfHearingGuard
 from ultron.cron_manager import CronManager
 from ultron.output_manager import OutputManager
 
@@ -124,8 +125,25 @@ def tool_label(name: str) -> str:
             return label
     return name.replace("_", " ")
 
+# How long to keep waiting for the local model to load, so its real context
+# window can be read. Generous: it only loads when the user first speaks.
+CONTEXT_CHECK_WINDOW_SECONDS = 900
+CONTEXT_CHECK_POLL_SECONDS = 20
+
 # How often the reminder worker scans for due tasks.
 REMINDER_POLL_SECONDS = 15
+
+# How often to look for routines that have come due.
+ROUTINE_POLL_SECONDS = 30
+
+# A routine later than this was missed rather than merely delayed, and is
+# skipped. Routines can act, and an action taken hours after its moment is at
+# best surprising. Generous enough to survive a slow poll or a busy turn.
+ROUTINE_MISSED_AFTER_SECONDS = 300
+
+# Consecutive failures before a routine switches itself off rather than
+# failing silently every morning forever.
+ROUTINE_MAX_FAILURES = 3
 
 # How often to check whether the silence has gone on long enough. Coarse on
 # purpose: the threshold is measured in tens of minutes, so polling faster
@@ -225,16 +243,26 @@ class UltronCore:
         # Inputs to the derived state, each owned by a different component.
         self._speaking = False
         self._busy = False
+        # On speakers, the microphone hears Ultron. Voice input interrupts
+        # speech and is then obeyed, so without this it cuts itself off and
+        # answers its own words.
+        self._self_hearing = SelfHearingGuard()
         self._active_tool = None
         self._state = STATE_IDLE
 
         self.output_manager.on_message(self._emit_assistant)
+        self.output_manager.on_message(
+            lambda text, _source: self._self_hearing.note_spoken(text))
         self.output_manager.on_speaking_changed(self._on_speaking_changed)
         self.speaker.on_level(self._on_speaker_level)
         self.brain.on_tool_event(self._on_tool_event)
         # Destructive tools ask a human before running. Refused by default if
         # no front end registers itself as able to ask.
         self.brain.set_confirm_handler(self._confirm)
+        # "Run it now" has to go through the same queue as everything else, so
+        # one turn never starts on top of another.
+        self.brain.routine_runner = (
+            lambda routine: self._command_queue.put(("routine", routine, False)))
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -338,13 +366,81 @@ class UltronCore:
 
     def _on_speaking_changed(self, speaking: bool):
         self._speaking = speaking
+        self._self_hearing.note_speaking(speaking)
         if not speaking:
             self._last_exchange = time.monotonic()
         if not speaking:
             self._emit_level(0.0)
         self._recompute_state()
 
+    def _check_context_window(self):
+        """Says so when the local model cannot hold Ultron's own instructions.
+
+        This failed silently for weeks: the window was 4,096, the system prompt
+        6,736, and everything past the limit was dropped without a word. Ultron
+        looked forgetful when it was in fact being truncated. Whatever else is
+        true, that should never again go unmentioned.
+        """
+        if self.brain.active_api != "localapi":
+            return
+
+        from ultron import local_model
+
+        url = config.get("local_api_url", "http://localhost:11434/v1")
+        deadline = time.monotonic() + CONTEXT_CHECK_WINDOW_SECONDS
+        while self._running and time.monotonic() < deadline:
+            try:
+                length = local_model.fetch_context_length(
+                    url, self.brain.selected_model)
+            except Exception as e:
+                self._status(f"[Model] could not check the context window: {e}")
+                return
+
+            if length:
+                warning = local_model.diagnose(
+                    self.brain._message_size(self.brain.messages[0]),
+                    length,
+                    self.brain.selected_model,
+                )
+                if warning:
+                    self._status(warning)
+                return
+
+            # Unless a Modelfile pins num_ctx, the window does not exist until
+            # Ollama loads the model — which happens on the first request, not
+            # at startup. Waiting for that is the only way to catch the case
+            # that caused this: an unpinned model quietly given 4,096 tokens.
+            for _ in range(CONTEXT_CHECK_POLL_SECONDS * 2):
+                if not self._running:
+                    return
+                time.sleep(0.5)
+
+    def _is_own_voice(self, heard: str) -> bool:
+        """Whether a transcription is Ultron hearing itself through the speakers.
+
+        Switchable off, because on headphones there is nothing to hear and the
+        guard can only cost you: it has no upside and a small chance of
+        discarding something you actually said.
+        """
+        if not config.get("self_hearing_guard", True):
+            return False
+
+        ignored = self._self_hearing.is_own_voice(heard)
+        if ignored:
+            self._status(f"[Voice] ignored its own voice: {heard!r}")
+        return ignored
+
     def _on_tool_event(self, phase: str, name: str, _detail=None):
+        from ultron.brain import SCREEN_TOOLS
+
+        if phase == "start" and name in SCREEN_TOOLS:
+            # Warned before the keys start flying, not reported afterwards.
+            # Anything typed while the user is still using the keyboard ends
+            # up interleaved with what they were doing.
+            self.output_manager.enqueue(
+                "Hands off the keyboard and mouse for a moment, sir.",
+                source="system")
+
         self._active_tool = name if phase == "start" else None
         self._recompute_state()
 
@@ -401,6 +497,9 @@ class UltronCore:
                 continue
             if text is None:
                 break
+            if origin == "routine":
+                self._run_routine(text)
+                continue
             self._handle(text, was_queued)
 
     def _handle(self, text: str, was_queued: bool):
@@ -472,6 +571,7 @@ class UltronCore:
         try:
             self.listener = VoiceListener(callback_func=lambda spoken: self.submit(spoken, origin="voice"))
             self.listener.on_level(self._on_mic_level)
+            self.listener.ignore_check = self._is_own_voice
             self.listener.start_listening()
             self._recompute_state()
             return True
@@ -534,12 +634,21 @@ class UltronCore:
                         self.brain.db.delete_task(task_id)
 
                     send_toast("Ultron Reminder", desc)
+                    # What a bare "snooze it" refers to. Recorded even for a
+                    # one-off, which has just been deleted above and would
+                    # otherwise be unreachable the instant it went off.
+                    self.brain.last_fired_reminder = {
+                        "description": desc, "frequency": frequency,
+                    }
+                    spoken = f"Sir, here is your reminder: {desc}"
+                    # So that "snooze it" or "what was that?" has something to
+                    # refer to — the reminder was announced by this loop, not
+                    # by a turn, so nothing else puts it in the conversation.
+                    self.brain.note_unprompted_line(spoken)
                     # Its own source, so a UI can tell a due reminder apart
                     # from a passing loading phrase. Unlike "cron" this is
                     # never dropped when the user interrupts.
-                    self.output_manager.enqueue(
-                        f"Sir, here is your reminder: {desc}", source="reminder"
-                    )
+                    self.output_manager.enqueue(spoken, source="reminder")
             except Exception as e:
                 self._status(f"[Reminder Error] {e}")
 
@@ -548,6 +657,146 @@ class UltronCore:
                 if not self._running:
                     return
                 time.sleep(0.5)
+
+    def _routine_loop(self):
+        """Runs due routines, and quietly reschedules the ones that were missed.
+
+        Missed routines are deliberately NOT run late. A routine can act — open
+        apps, start containers, send things — and an action taken hours after
+        its moment is at best surprising and at worst wrong. If Ultron was not
+        running at 08:00, the 08:00 routine did not happen; it is due again
+        tomorrow.
+        """
+        from ultron import routines as sched
+
+        while self._running:
+            for _ in range(ROUTINE_POLL_SECONDS * 2):
+                if not self._running:
+                    return
+                time.sleep(0.5)
+
+            try:
+                now = datetime.datetime.now()
+                for routine in self.brain.db.list_routines():
+                    if not routine["enabled"] or not routine["next_run"]:
+                        continue
+                    try:
+                        due = datetime.datetime.fromisoformat(routine["next_run"])
+                    except (TypeError, ValueError):
+                        self._reschedule_routine(routine, now)
+                        continue
+                    if due > now:
+                        continue
+
+                    late = (now - due).total_seconds()
+                    self._reschedule_routine(routine, now)
+
+                    if late > ROUTINE_MISSED_AFTER_SECONDS:
+                        self._status(
+                            f"[Routine] '{routine['name']}' was missed by "
+                            f"{late / 60:.0f} min — skipping, not running late"
+                        )
+                        continue
+
+                    self._command_queue.put(("routine", routine, False))
+            except Exception as e:
+                self._status(f"[Routine Error] {e}")
+
+    def _reschedule_routine(self, routine: dict, now: datetime.datetime):
+        """Moves a routine to its next slot, or retires a spent one-off."""
+        from ultron import routines as sched
+
+        following = sched.next_run(routine["schedule"], after=now)
+        if following is None:
+            self.brain.db.update_routine(routine["id"], enabled=0, next_run=None)
+            self._status(f"[Routine] '{routine['name']}' has no future runs — disabled")
+        else:
+            self.brain.db.update_routine(routine["id"], next_run=following.isoformat())
+
+    def _run_routine(self, routine: dict):
+        """Carries out one routine's instruction with tools available."""
+        from ultron import routines as sched
+
+        name = routine["name"]
+        self._status(f"[Routine] running '{name}'")
+        self._set_busy(True)
+
+        now = datetime.datetime.now()
+        location = ""
+        try:
+            for memory in self.brain.db.list_memories():
+                if memory["key"].lower() in ("user_location", "location"):
+                    location = memory["value"]
+                    break
+        except Exception as e:
+            self._status(f"[Routine] could not read location: {e}")
+
+        # The date is stated rather than left to the model, which does not
+        # reliably know what day it is and will invent one if asked.
+        prompt = (
+            f"This is your scheduled routine '{name}', running automatically.\n"
+            f"Today is {now:%A, %d %B %Y}, the time is {now:%H:%M}.\n"
+            + (f"The user is in {location}.\n" if location else "")
+            + "Use your tools to find real information — do not answer from "
+              "memory alone, and never state a fact you have not looked up.\n\n"
+            f"Your instruction: {routine['instruction']}"
+        )
+
+        # Destructive tools are refused while this runs: nobody is present to
+        # approve them, and the confirmation gate would only block and refuse
+        # after a timeout anyway.
+        self.brain.unattended = True
+        try:
+            result = self.brain.process_input(prompt)
+        except Exception as e:
+            result = ""
+            self._status(f"[Routine] '{name}' failed: {e}")
+        finally:
+            self.brain.unattended = False
+            self._set_busy(False)
+
+        if not result:
+            fails = routine["fail_count"] + 1
+            updates = {"fail_count": fails, "last_run": now.isoformat()}
+            if fails >= ROUTINE_MAX_FAILURES:
+                # Failing silently every morning forever helps nobody.
+                updates["enabled"] = 0
+                self.output_manager.enqueue(
+                    f"Sir, the routine '{name}' has failed {fails} times, so I "
+                    "have switched it off.", source="system")
+            self.brain.db.update_routine(routine["id"], **updates)
+            return
+
+        self.brain.db.update_routine(
+            routine["id"], last_run=now.isoformat(), last_result=result,
+            fail_count=0,
+        )
+
+        deliver = routine["deliver"]
+        if "toast" in deliver:
+            try:
+                from ultron.plugins.notification_plugin import send_toast
+                send_toast(f"Ultron — {name}", result[:200])
+            except Exception as e:
+                self._status(f"[Routine] toast failed: {e}")
+        if "file" in deliver:
+            self._append_routine_log(name, now, result)
+        if "speak" in deliver or "card" in deliver:
+            self.output_manager.enqueue(result, source="routine")
+
+    def _append_routine_log(self, name: str, when: datetime.datetime, result: str):
+        """Keeps a routine's history as markdown worth going back to."""
+        import os
+        import re
+
+        try:
+            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "routine"
+            folder = os.path.join(DATA_DIR, "routines")
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, f"{slug}.md"), "a", encoding="utf-8") as f:
+                f.write(f"\n\n## {when:%A, %d %B %Y at %H:%M}\n\n{result}\n")
+        except Exception as e:
+            self._status(f"[Routine] could not write the log: {e}")
 
     def _idle_loop(self):
         """Speaks up unprompted after a long enough silence.
@@ -594,6 +843,10 @@ class UltronCore:
                     continue
 
                 self._idle_nudges_unanswered += 1
+                # Into the conversation before it is said, so that "yes, do
+                # it" has an "it" to refer to. Without this the offer exists
+                # only as audio and Ultron has to ask what the user meant.
+                self.brain.note_unprompted_line(line)
                 # Its own source so a UI can style it, and so an interrupt
                 # discards it — an unprompted remark must never delay a real
                 # answer the user is waiting for.
@@ -623,6 +876,16 @@ class UltronCore:
         idle = threading.Thread(target=self._idle_loop, daemon=True)
         idle.start()
         self._threads.append(idle)
+
+        routines = threading.Thread(target=self._routine_loop, daemon=True)
+        routines.start()
+        self._threads.append(routines)
+
+        # Off the startup path: it talks to Ollama, which may be slow or down,
+        # and nothing else waits on the answer.
+        context_check = threading.Thread(target=self._check_context_window, daemon=True)
+        context_check.start()
+        self._threads.append(context_check)
 
         if config.get("microphone_active", True):
             self.start_microphone()

@@ -211,6 +211,23 @@ QFrame#separator {{
     max-height: 1px;
     border: none;
 }}
+
+QFrame#routineRow {{
+    background: {PANEL_LIGHT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QLabel#routineName {{
+    color: {TEXT};
+    font-weight: 600;
+}}
+QLabel#routineName:disabled {{
+    color: {TEXT_DIM};
+}}
+QPushButton#smallButton {{
+    padding: 3px 9px;
+    font-size: 11px;
+}}
 """
 
 

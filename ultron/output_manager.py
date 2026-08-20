@@ -61,7 +61,7 @@ class OutputManager:
 
         Args:
             message:   The text to be spoken.
-            source:    One of "user", "system", "cron", or "idle".
+            source:    One of "user", "system", "cron", "idle" or "routine".
             print_msg: Whether to print the message to the console.
         """
         if message and message.strip():

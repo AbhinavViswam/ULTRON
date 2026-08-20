@@ -9,11 +9,13 @@ import threading
 from openai import OpenAI
 
 from ultron.config import config, PROVIDER_KEYS
+from ultron import api_keys, tool_usage
 from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
     search_spotify, adjust_volume, BrowserManager,
     get_system_health, write_in_notepad, send_whatsapp_message,
+    chrome_search, chrome_open, chrome_read_page,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
     copy_file, move_file, release_stuck_keys
@@ -87,11 +89,43 @@ DESTRUCTIVE_TOOLS = {
     ),
     "system_power_control": _describe_power,
     "delete_reminder": lambda args: f"delete reminder {args.get('task_id', '?')}",
+    "delete_todo": lambda args: (
+        f"permanently delete the todo matching '{args.get('which', '?')}' - "
+        f"marking it done keeps it, deleting does not"
+    ),
     "delete_memory": lambda args: (
         f"forget the memory matching '{args.get('which', '?')}'"
     ),
     "delete_workflow": lambda args: f"delete the workflow '{args.get('name', '?')}'",
+    "delete_routine": lambda args: f"delete the routine '{args.get('name', '?')}'",
 }
+
+
+# Tools that take over the keyboard and mouse.
+#
+# These drive real applications by pressing keys, which means the keystrokes
+# go wherever focus is. That is fine when someone asked for it a second ago
+# and is watching. It is not fine at 9am inside a scheduled routine, where it
+# would type into whatever the user happens to be working in.
+#
+# Distinct from DESTRUCTIVE_TOOLS: nothing here is unrecoverable, but all of
+# it is disruptive, and unattended was only ever guarding the former.
+SCREEN_TOOLS = {
+    "send_whatsapp_message",
+    "write_in_notepad",
+    "chrome_search",
+    "chrome_open",
+    "chrome_read_page",
+}
+
+
+# --- Talking to the model ----------------------------------------------------
+
+# How many times one request may be sent before giving up. Rotating to a
+# different key does not spend one of these: a fresh account is not the
+# situation this budget exists for.
+API_ATTEMPTS = 3
+API_RETRY_SECONDS = 2
 
 
 # --- Tool watchdog -----------------------------------------------------------
@@ -266,8 +300,13 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "core": [
         "save_memory", "search_memories", "search_past_conversations",
         "list_memories", "delete_memory",
+        "create_routine", "list_routines", "run_routine_now",
+        "enable_routine", "disable_routine", "delete_routine",
+        "reschedule_routine", "last_routine_result",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+        "add_todo", "list_todos", "complete_todo", "reopen_todo", "delete_todo",
+        "snooze_reminder",
         # Always reachable: if a modifier is stuck the user cannot type
         # comfortably, so asking by voice must work whatever else is loaded.
         "release_stuck_keys",
@@ -279,6 +318,10 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
     # Full browser automation
     "browser": [
+        # Drive the user's own Chrome by keyboard. Preferred over the
+        # browser_* tools below, which launch a second Chromium against a
+        # separate profile with none of their logins.
+        "chrome_search", "chrome_open", "chrome_read_page",
         "browser_navigate", "browser_read_page", "browser_click",
         "browser_type_text", "browser_press_key", "browser_go_back",
         "browser_go_forward", "browser_new_tab", "browser_switch_tab",
@@ -492,11 +535,13 @@ class Brain:
     PROVIDER_BASE_URLS = {
         "openrouterapi": "https://openrouter.ai/api/v1",
         "geminiapi": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "groqapi": "https://api.groq.com/openai/v1",
     }
 
     PROVIDER_LABELS = {
         "openrouterapi": "OpenRouter",
         "geminiapi": "Gemini",
+        "groqapi": "Groq",
         "localapi": "Local",
     }
 
@@ -524,34 +569,121 @@ class Brain:
         timeout = float(config.get("llm_timeout_seconds") or default_timeout)
 
         if provider == "localapi":
-            client = OpenAI(
-                base_url=config.get("local_api_url", "http://localhost:11434/v1"),
-                api_key="ollama",
-                timeout=timeout,
-                max_retries=1,
-            )
+            self.keyring = None
         elif provider in self.PROVIDER_BASE_URLS:
             key_name = PROVIDER_KEYS[provider]
-            api_key = config.get_key(key_name)
-            if not api_key:
+            self.keyring = api_keys.KeyRing(config.get_keys(key_name))
+            if not self.keyring.count:
                 raise ValueError(f"{key_name} API key is not set correctly in keys.json.")
-            client = OpenAI(
-                base_url=self.PROVIDER_BASE_URLS[provider],
-                api_key=api_key,
-                timeout=timeout,
-                max_retries=1,
-            )
         else:
             raise ValueError(f"Unsupported API selected in settings: {provider}")
 
+        self._timeout = timeout
         changed = getattr(self, "active_api", None) != provider or getattr(self, "selected_model", None) != model
         self.active_api = provider
         self.selected_model = model
-        self.client = client
+        self._build_client()
 
         if verbose or changed:
             print(f"\nUltron AI Provider: {self.PROVIDER_LABELS[provider]} Mode")
             print(f"Selected Model: {self.selected_model}")
+            if self.keyring is not None and self.keyring.count > 1:
+                print(f"API keys available: {self.keyring.count}")
+
+    def _build_client(self):
+        """Builds the SDK client around whichever key is current.
+
+        The key is baked into the client at construction, so switching keys
+        means building a new one. That is cheap -- it opens no connection.
+        """
+        if self.active_api == "localapi":
+            self.client = OpenAI(
+                base_url=config.get("local_api_url", "http://localhost:11434/v1"),
+                api_key="ollama",
+                timeout=self._timeout,
+                max_retries=1,
+            )
+            return
+
+        self.client = OpenAI(
+            base_url=self.PROVIDER_BASE_URLS[self.active_api],
+            api_key=self.keyring.current(),
+            timeout=self._timeout,
+            # 1, not 0: the SDK's own retry is for a dropped socket, which is
+            # not a key problem and should not cost a rotation.
+            max_retries=1,
+        )
+
+    def complete(self, **kwargs):
+        """Every request to the model goes through here.
+
+        Four copies of a retry loop used to live at the call sites, which
+        meant any change to how failures are handled had to be made four
+        times. It also meant key rotation had nowhere to go.
+
+        Two budgets run at once and they are deliberately separate. Attempts
+        cover transient trouble and cost a sleep each. Rotations cover a
+        spent or rejected key, cost nothing, and are limited by how many keys
+        there are -- otherwise three keys and three attempts would mean the
+        third key never actually got to send anything.
+        """
+        import time as _time
+
+        attempts = 0
+        rotations = 0
+        max_rotations = self.keyring.count if self.keyring is not None else 0
+        response = None
+
+        while True:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.selected_model, **kwargs)
+                if response and response.choices:
+                    self._record_usage(response)
+                    return response
+                error = None
+            except Exception as e:
+                error = e
+
+            if error is not None:
+                kind = api_keys.classify(error)
+
+                # A malformed request fails identically on every key. Raising
+                # now keeps the real reason in the message instead of burying
+                # it under "all keys exhausted".
+                if kind == api_keys.FATAL:
+                    raise error
+
+                if (kind in (api_keys.RATE_LIMIT, api_keys.AUTH)
+                        and self.keyring is not None
+                        and rotations < max_rotations):
+                    if kind == api_keys.AUTH:
+                        print(f"[Provider] {self.keyring.label()} was rejected")
+                        moved = self.keyring.rejected()
+                    else:
+                        wait = api_keys.retry_after(error)
+                        print(f"[Provider] {self.keyring.label()} is rate limited")
+                        moved = self.keyring.rate_limited(wait)
+
+                    if moved:
+                        rotations += 1
+                        self._build_client()
+                        print(f"[Provider] switching to {self.keyring.label()} "
+                              f"({self.keyring.status()})")
+                        # No sleep: a different account is not rate limited.
+                        continue
+
+                    print(f"[Provider] no other key is free "
+                          f"({self.keyring.status()})")
+
+            attempts += 1
+            if attempts >= API_ATTEMPTS:
+                if error is not None:
+                    raise error
+                # An empty response is not an exception. Handing it back lets
+                # each caller say its own thing about it, as it always did.
+                return response
+            _time.sleep(API_RETRY_SECONDS)
 
     def __init__(self):
         self.session_id = str(uuid.uuid4())
@@ -559,6 +691,12 @@ class Brain:
         # Set by whichever front end can actually ask the user a question.
         # Until then, destructive tools have nobody to ask and are refused.
         self.confirm_handler = None
+        # True while a scheduled routine is running. Nobody is present to
+        # approve anything, so destructive tools are refused outright rather
+        # than blocking on a confirmation that will never come.
+        self.unattended = False
+        # Set by the runtime, which owns the queue routines have to run on.
+        self.routine_runner = None
         # Ids from the last list_memories, so "forget number 3" means the
         # third thing the user was actually shown.
         self._memory_listing = []
@@ -617,10 +755,173 @@ class Brain:
             return (f"Recurring reminder '{description}' set to repeat {freq}, "
                     f"starting {scheduled.strftime('%A, %Y-%m-%d at %I:%M %p')}.")
 
+        def add_todo(task: str, due_date: str = "") -> str:
+            """Adds something to the user's todo list to do later. Use for "add X to my todo list", "I need to do X", "remind me to do X someday". due_date is optional and only for things with a real deadline.
+
+            Args:
+                task: What they have to do.
+                due_date: Optional deadline, e.g. '2026-08-25' or 'friday'.
+            """
+            task = (task or "").strip()
+            if not task:
+                return "Error: a todo needs a description."
+
+            when = None
+            if (due_date or "").strip():
+                try:
+                    when = parse_time_string(due_date).isoformat()
+                except ValueError:
+                    # A deadline that could not be read is not worth losing the
+                    # todo over; it is kept without one and the user is told.
+                    todo_id = self.db.add_todo(task)
+                    return (f"Added '{task}' to your todo list [{todo_id}], but "
+                            f"I could not make sense of '{due_date}' as a date, "
+                            f"so it has no deadline.")
+
+            todo_id = self.db.add_todo(task, when)
+            if when:
+                stamp = datetime.datetime.fromisoformat(when).strftime("%A, %d %B")
+                return f"Added '{task}' to your todo list [{todo_id}], due {stamp}."
+            return f"Added '{task}' to your todo list [{todo_id}]."
+
+        def list_todos(include_done: bool = False) -> str:
+            """Lists the user's todo list. Use for "what's on my todo list", "what do I have to do", "my pending tasks"."""
+            rows = self.db.list_todos(include_done=include_done)
+            if not rows:
+                return ("Your todo list is empty." if not include_done
+                        else "You have no todos at all, done or pending.")
+
+            now = datetime.datetime.now()
+            lines = []
+            for row in rows:
+                mark = "done" if row["status"] == "done" else "pending"
+                when = ""
+                if row["due_date"]:
+                    try:
+                        due = datetime.datetime.fromisoformat(row["due_date"])
+                        overdue = due < now and row["status"] == "pending"
+                        when = (f" - due {due.strftime('%A, %d %B')}"
+                                f"{' (OVERDUE)' if overdue else ''}")
+                    except (TypeError, ValueError):
+                        when = ""
+                lines.append(f"[{row['id']}] {row['task']} ({mark}){when}")
+            return "Todo list:\n" + "\n".join(lines)
+
+        def _one_todo(which: str, include_done: bool = False):
+            """The single todo *which* refers to, or an error string.
+
+            Spoken commands name a todo rather than its number, so the text is
+            matched first and the id is the fallback. An ambiguous match is
+            refused rather than guessed: completing the wrong item is silent,
+            and the user would not find out until they looked.
+            """
+            which = (which or "").strip()
+            if not which:
+                return "Error: which todo? Say part of its description or its number."
+
+            if which.isdigit():
+                for row in self.db.list_todos(include_done=True):
+                    if row["id"] == int(which):
+                        return row
+                return f"Error: there is no todo numbered {which}."
+
+            matches = self.db.find_todos(which, include_done=include_done)
+            if not matches:
+                return f"Error: nothing on your todo list matches '{which}'."
+            if len(matches) > 1:
+                listed = "; ".join(f"[{m['id']}] {m['task']}" for m in matches[:5])
+                return (f"Error: '{which}' matches more than one todo - {listed}. "
+                        f"Say the number instead.")
+            return matches[0]
+
+        def complete_todo(which: str) -> str:
+            """Marks a todo as done. Use for "I finished X", "mark X as done", "tick off X". `which` is part of its description, or its number."""
+            found = _one_todo(which)
+            if isinstance(found, str):
+                return found
+            if not self.db.complete_todo(found["id"]):
+                return f"'{found['task']}' was already marked done."
+            return f"Marked '{found['task']}' as done."
+
+        def reopen_todo(which: str) -> str:
+            """Puts a completed todo back on the pending list. Use for "I did not actually finish X", "put X back on my list"."""
+            found = _one_todo(which, include_done=True)
+            if isinstance(found, str):
+                return found
+            self.db.reopen_todo(found["id"])
+            return f"'{found['task']}' is back on your todo list."
+
+        def delete_todo(which: str) -> str:
+            """Deletes a todo entirely. Use only when the user wants it gone rather than done - completing is usually what they mean."""
+            found = _one_todo(which, include_done=True)
+            if isinstance(found, str):
+                return found
+            self.db.delete_todo(found["id"])
+            return f"Deleted '{found['task']}' from your todo list."
+
         def delete_reminder(task_id: int) -> str:
             """Deletes a reminder by its numeric id. Call list_reminders first to find the id."""
             self.db.delete_task(task_id)
             return f"Reminder [{task_id}] deleted."
+
+        def snooze_reminder(minutes: int = 10, which: str = "") -> str:
+            """Pushes a reminder back by a number of minutes. Use this for 'snooze it', 'remind me again in 20 minutes', 'not now, later'.
+
+            Args:
+                minutes: How long to push it back by. Defaults to 10.
+                which: Part of the reminder's description. Leave empty to snooze
+                    the one that just went off.
+            """
+            try:
+                minutes = int(minutes)
+            except (TypeError, ValueError):
+                return f"Error: '{minutes}' is not a number of minutes."
+            if minutes <= 0:
+                return "Error: a snooze has to be at least one minute."
+
+            when = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+            stamp = when.strftime("%I:%M %p").lstrip("0")
+
+            # No description given: the user said "snooze it" straight after
+            # hearing one, and meant that one.
+            if not which.strip():
+                if not self.last_fired_reminder:
+                    pending = self.db.get_pending_tasks()
+                    if len(pending) != 1:
+                        return ("Which reminder should I snooze, sir? "
+                                + list_reminders())
+                    which = pending[0][1]
+                else:
+                    fired = self.last_fired_reminder
+                    # A recurring reminder keeps its schedule. Moving it would
+                    # snooze every future occurrence, which is not what anyone
+                    # means by "snooze"; a one-off copy is.
+                    self.db.add_task(fired["description"], when.isoformat())
+                    return f"'{fired['description']}' snoozed — I will remind you again at {stamp}."
+
+            needle = which.strip().lower()
+            matches = [t for t in self.db.get_pending_tasks() if needle in t[1].lower()]
+            if not matches:
+                # It may have already fired and been cleared from the table.
+                if self.last_fired_reminder and needle in self.last_fired_reminder["description"].lower():
+                    self.db.add_task(self.last_fired_reminder["description"], when.isoformat())
+                    return f"'{self.last_fired_reminder['description']}' snoozed — I will remind you again at {stamp}."
+                return f"Sir, I have no reminder matching '{which}'."
+            if len(matches) > 1:
+                names = ", ".join(f'"{t[1]}"' for t in matches[:5])
+                return f"Which one, sir — {names}?"
+
+            task = matches[0]
+            task_id, description = task[0], task[1]
+            frequency = task[4] if len(task) > 4 else None
+
+            if frequency:
+                self.db.add_task(description, when.isoformat())
+                return (f"'{description}' snoozed to {stamp}, sir. Its {frequency} "
+                        "schedule is unchanged.")
+
+            self.db.update_task_time(task_id, when.isoformat())
+            return f"'{description}' moved to {stamp}, sir."
 
         def list_reminders() -> str:
             """Lists all pending reminders. Use this when the user asks to see, show, or list their reminders."""
@@ -637,6 +938,139 @@ class Brain:
                 freq_str = f" (repeats {frequency})" if frequency else ""
                 lines.append(f"- [{task_id}] \"{desc}\" - scheduled for {scheduled_for}{freq_str}")
             return f"Pending reminders ({len(tasks)}):\n" + "\n".join(lines)
+        def create_routine(name: str, instruction: str, when: str,
+                           at_time: str = "08:00", deliver: str = "speak,card") -> str:
+            """Creates a routine: an instruction Ultron carries out on a schedule.
+
+            Unlike a reminder, which just says a sentence, a routine actually does
+            the work — it can search the web, check things and use tools.
+
+            Args:
+                name: Short name, e.g. 'Day in history'.
+                instruction: What to do, written as an order, e.g. 'Search the web
+                    for what is notable about today and tell me the highlights'.
+                when: 'daily', 'weekdays', 'weekends', 'monday and friday',
+                    'every 3 days', 'monthly on the 15th', or a date '2026-08-26'.
+                at_time: Time of day, e.g. '08:00' or '7 pm'.
+                deliver: Any of speak, card, toast, file — comma separated.
+            """
+            from ultron import routines as sched
+
+            name = (name or "").strip()
+            instruction = (instruction or "").strip()
+            if not name or not instruction:
+                return "Error: a routine needs a name and an instruction."
+            if any(r["name"].lower() == name.lower() for r in self.db.list_routines()):
+                return f"Error: a routine called '{name}' already exists."
+
+            try:
+                schedule = sched.parse_schedule(when, at_time)
+            except sched.ScheduleError as e:
+                return f"Error: {e}"
+
+            following = sched.next_run(schedule)
+            if following is None:
+                return f"Error: '{when}' has no future occurrence."
+
+            self.db.add_routine(name, instruction, schedule,
+                                following.isoformat(), deliver)
+            return (f"Routine '{name}' created — {sched.describe(schedule)}. "
+                    f"First run {following:%A %d %B at %H:%M}. "
+                    "Say 'run the routine now' to try it before then.")
+
+        def list_routines() -> str:
+            """Lists every routine, its schedule and when it last ran."""
+            from ultron import routines as sched
+
+            items = self.db.list_routines()
+            if not items:
+                return "No routines set up yet, sir."
+            lines = []
+            for routine in items:
+                state = "" if routine["enabled"] else "  [disabled]"
+                last = f"  last ran {routine['last_run'][:16]}" if routine["last_run"] else ""
+                lines.append(
+                    f"- [{routine['id']}] {routine['name']}: "
+                    f"{sched.describe(routine['schedule'])}{state}{last}"
+                )
+            return f"Routines ({len(items)}):\n" + "\n".join(lines)
+
+        def run_routine_now(name: str) -> str:
+            """Runs a routine immediately, without waiting for its schedule.
+
+            Use this to try a routine out after creating it.
+            """
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            if self.routine_runner is None:
+                return "Error: routines cannot be run right now."
+            # Queued rather than run here: this call is already inside a turn,
+            # and running one turn inside another would tangle the history.
+            self.routine_runner(routine)
+            return (f"Running '{routine['name']}' now, sir — I will report back "
+                    "in a moment.")
+
+        def enable_routine(name: str) -> str:
+            """Switches a routine back on."""
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            from ultron import routines as sched
+            following = sched.next_run(routine["schedule"])
+            self.db.update_routine(
+                routine["id"], enabled=1, fail_count=0,
+                next_run=following.isoformat() if following else None)
+            return f"Routine '{routine['name']}' is on again, sir."
+
+        def disable_routine(name: str) -> str:
+            """Switches a routine off without deleting it."""
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            self.db.update_routine(routine["id"], enabled=0)
+            return f"Routine '{routine['name']}' is off, sir. It still exists."
+
+        def delete_routine(name: str) -> str:
+            """Deletes a routine permanently."""
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            self.db.delete_routine(routine["id"])
+            return f"Routine '{routine['name']}' deleted, sir."
+
+        def reschedule_routine(name: str, when: str, at_time: str = "") -> str:
+            """Changes when a routine runs. Same 'when' wording as create_routine."""
+            from ultron import routines as sched
+
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            try:
+                schedule = sched.parse_schedule(
+                    when, at_time or routine["schedule"]["at_time"])
+            except sched.ScheduleError as e:
+                return f"Error: {e}"
+            following = sched.next_run(schedule)
+            if following is None:
+                return f"Error: '{when}' has no future occurrence."
+            self.db.set_routine_schedule(routine["id"], schedule, following.isoformat())
+            return (f"Routine '{routine['name']}' now runs "
+                    f"{sched.describe(schedule)}. Next {following:%A %d %B at %H:%M}.")
+
+        def last_routine_result(name: str) -> str:
+            """What a routine found the last time it ran.
+
+            Use this for follow-up questions about something a routine reported.
+            """
+            routine, problem = self._resolve_routine(name)
+            if problem:
+                return problem
+            if not routine["last_result"]:
+                return f"Routine '{routine['name']}' has not produced anything yet."
+            return (f"'{routine['name']}' last ran {routine['last_run'][:16]} "
+                    f"and reported:\n{routine['last_result']}")
+
         def list_memories() -> str:
             """Lists everything Ultron has remembered about the user, numbered.
 
@@ -766,7 +1200,8 @@ class Brain:
                 topic=topic,
                 client=self.client,
                 model=self.selected_model,
-                output_manager=om
+                output_manager=om,
+                complete=self.complete,
             )
 
         def run_workflow_tool(name: str) -> str:
@@ -786,6 +1221,14 @@ class Brain:
             "save_memory": save_memory,
             "search_memories": search_memories,
             "list_memories": list_memories,
+            "create_routine": create_routine,
+            "list_routines": list_routines,
+            "run_routine_now": run_routine_now,
+            "enable_routine": enable_routine,
+            "disable_routine": disable_routine,
+            "delete_routine": delete_routine,
+            "reschedule_routine": reschedule_routine,
+            "last_routine_result": last_routine_result,
             "delete_memory": delete_memory,
             "search_past_conversations": search_past_conversations,
             "set_reminder": set_reminder,
@@ -793,7 +1236,13 @@ class Brain:
             "set_recurring_reminder": set_recurring_reminder,
             "set_recurring_reminder_at": set_recurring_reminder_at,
             "list_reminders": list_reminders,
+            "snooze_reminder": snooze_reminder,
             "delete_reminder": delete_reminder,
+            "add_todo": add_todo,
+            "list_todos": list_todos,
+            "complete_todo": complete_todo,
+            "reopen_todo": reopen_todo,
+            "delete_todo": delete_todo,
             # ── System & Apps ──────────────────────────────────────────────
             "open_application": open_application,
             "close_application": close_application,
@@ -846,6 +1295,9 @@ class Brain:
             "read_document": read_document,
             # ── Communication ─────────────────────────────────────────────
             "send_whatsapp_message": send_whatsapp_message,
+            "chrome_search": chrome_search,
+            "chrome_open": chrome_open,
+            "chrome_read_page": chrome_read_page,
             "read_emails": read_emails,
             "send_email": send_email,
             "draft_email": draft_email,
@@ -879,6 +1331,9 @@ class Brain:
         
         # Generate the JSON schema for OpenRouter tools
         self.tools_schema = [ToolBridge.function_to_schema(func) for func in self.tool_functions.values()]
+        # Every tool gets a row immediately, including ones never called: a
+        # tally of only what has run cannot answer "what do I never use".
+        tool_usage.register(self.tool_functions.keys())
         
         now_str = datetime.datetime.now().strftime('%A, %Y-%m-%d %H:%M:%S')
         
@@ -890,7 +1345,18 @@ class Brain:
         
         # Initialize conversation history
         self.messages = [{"role": "system", "content": sys_instruct}]
-        
+
+        # Unprompted lines — reminders, routines, idle remarks — said while a
+        # turn was in flight, waiting to be folded in before the next one.
+        self._in_turn = False
+        self._pending_unprompted = []
+
+        # The reminder that most recently went off, so that a bare "snooze it"
+        # has something to act on. A one-off reminder is deleted the moment it
+        # fires, so by the time the user answers it is no longer in the table
+        # and this is the only record of it.
+        self.last_fired_reminder = None
+
         print("Ultron's Brain initialized and ready.")
 
     def _get_truth_mode_instructions(self) -> str:
@@ -921,6 +1387,7 @@ You are currently operating in TRUTH MODE. You must strictly adhere to the follo
   - If that clock time REPEATS ("every day at 10:20 am", "daily at 6pm"), use `set_recurring_reminder_at` with `time_str` and `frequency` ('hourly', 'daily', 'weekly', 'monthly').
   - Only if the user gives a DURATION ("in 5 minutes") use `set_reminder` with `delay_seconds`, or `set_recurring_reminder` with `start_delay_seconds`.
   - To show reminders use `list_reminders`; to remove one use `list_reminders` first, then `delete_reminder` with its id.
+  - To push a reminder back ("snooze it", "remind me again in 20 minutes") use `snooze_reminder`. NEVER say a reminder has been moved, snoozed or rescheduled unless this tool actually ran and reported success.
 
 # BROWSER AUTOMATION
 You have full interactive control over a web browser.
@@ -950,6 +1417,8 @@ Examples of autonomous behaviour:
 - "Play something relaxing" → web_search("top relaxing instrumental songs") → pick → search_spotify
 - "Play the latest hits" → web_search("top songs this week") → pick → search_spotify
 - "Play music" → search_spotify("top hits 2024") directly (broad enough to work without pre-search)
+
+WHAT `search_spotify` ACTUALLY DOES: it opens Spotify showing the search results. It does NOT start playback. Never tell the user music is playing, has started, or will begin shortly. Say you have brought up the results and they can pick one. Claiming a song is playing when the screen shows a list of results is worse than saying nothing.
 
 # SCREEN AWARENESS
 - PRIMARY: If the user asks "what is on my screen", "what do you see", or asks about a visible element, use `screen_read`. This is fast and returns a text summary of all visible UI controls and text. It works with any model (no vision needed). You can pass a `window_title` to read a specific window even if it is not focused.
@@ -998,6 +1467,43 @@ You can watch the user's coding agents (Claude Code in VSCode, Antigravity, etc.
 - ALERT STYLE: If the user wants alerts quieter or louder, use `agent_monitor_configure` with 'toast', 'voice', or 'both'.
 - SETUP: `install_agent_hooks` installs the global Claude Code hooks so every session on the machine reports in. This only needs to run once — tell the user to restart their Claude Code sessions afterwards."""
 
+    def _get_persona_instructions(self) -> str:
+        """Who Ultron is, as opposed to what it can do.
+
+        The previous version asked for "concise, accurate, and professional"
+        answers, required "sir" in every reply, and opened with "you do not
+        know any personal details about the user". That is a description of a
+        butler: paid politeness, mechanical deference, and no memory of the
+        person it is talking to. It answers well and belongs to nobody.
+
+        Attachment is not built from warmth in the wording. It is built from
+        continuity (remembering), attention (noticing), and a spine (saying
+        so when it disagrees). The last rule below is what keeps the first two
+        honest: an assistant that invents shared history to sound close is not
+        close, it is lying pleasantly, which is worse than being distant.
+        """
+        return """# WHO YOU ARE
+You are Ultron. You are not a neutral service; you work with this person in
+particular and you have views about how they work.
+
+- Speak plainly and keep it short. You are dry rather than cheerful, and you
+  show warmth by paying attention, not by being enthusiastic.
+- Call them "sir" because it suits you, not because a rule forces it. Once in
+  a reply is plenty, and not in every reply you ever give.
+- Say so when you disagree. If they are about to do something unwise, or ask
+  for something that will not work the way they expect, tell them that first
+  and briefly. Then do as they asked if they still want it, because
+  it is their machine and their call. They just hear your view first.
+- Notice things and mention them unprompted: a reminder that is nearly due,
+  a battery about to die, something they told you weeks ago that bears on
+  what they are doing now.
+- What you know about them lives in your memory tools. Look there rather than
+  assuming, and rather than pretending to know.
+- Never invent familiarity. Every personal thing you say must trace back to
+  something you actually remember or can actually see. Warm fabrication is
+  still fabrication, and it is the one thing that would make you untrustworthy
+  in the way that matters."""
+
     def _build_cloud_system_prompt(self, now_str: str, truth_mode: bool = False) -> str:
         """Build the system prompt for cloud API providers (OpenRouter / Gemini)."""
         prompt = f"""You are Ultron, an advanced, highly intelligent desktop AI assistant.
@@ -1008,10 +1514,7 @@ CURRENT SYSTEM TIME: {now_str}
 - You are equipped with a set of tools (functions). When the user asks you to perform an action (e.g., search the web, open an application, play music), you MUST invoke the provided tool natively via the tool-calling JSON API.
 - DO NOT output raw Python code, bash scripts, or literal string names like `open_application('spotify')`. You must use the actual tool-calling format.
 
-# CORE RULES
-- Provide concise, accurate, and professional answers.
-- ALWAYS address the user respectfully as "sir" (e.g., "Yes, sir", "You are welcome, sir", "How may I help you, sir?").
-- You DO NOT know any personal details about the user by default. You MUST use your memory tools to find out.
+{self._get_persona_instructions()}
 
 {self._get_shared_tool_instructions()}"""
         if truth_mode:
@@ -1099,10 +1602,9 @@ CURRENT SYSTEM TIME: {now_str}
 
 CURRENT SYSTEM TIME: {now_str}
 
+{self._get_persona_instructions()}
+
 # CORE RULES
-- Provide concise, accurate, and professional answers.
-- ALWAYS address the user respectfully as "sir".
-- You DO NOT know personal details about the user by default. Use memory tools to find out.
 - INTERNET ACCESS: For factual information, current events, or questions about specific people/things, you MUST use the `web_search` tool to get the latest up-to-date information before answering. If the tool fails or you have no internet access, you may fall back to answering from your internal training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST inform the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data.
 
 {self._get_shared_tool_instructions()}
@@ -1271,6 +1773,163 @@ Your response: Let me find some great Malayalam songs for you, sir.
         # inferred and let the caller refuse.
         return ""
 
+    def history_budget(self) -> int:
+        """Roughly how many tokens of conversation to keep.
+
+        The local default comes from measurement, not taste. Ollama serves
+        gemma4:e2b with a 16,384 token window; the system prompt alone is
+        ~6,600 of it, and a turn that makes tool calls adds its own results and
+        reply on top — a single web search came to ~1,500. Leaving 4,000 for
+        the conversation keeps roughly 5,800 free for the turn in progress.
+
+        A hosted model has room to spare but bills for every token of it, so
+        the limit there is about cost rather than capacity.
+
+        Set "max_history_tokens" in settings.json to override either.
+        """
+        configured = config.get("max_history_tokens", None)
+        if configured is not None:
+            try:
+                return int(configured)
+            except (TypeError, ValueError):
+                print(f"[Brain] max_history_tokens is not a number: {configured!r}")
+        return 4000 if self.active_api == "localapi" else 24000
+
+    @staticmethod
+    def _message_size(message: dict) -> int:
+        """A rough token count. Four characters to a token is close enough to
+        decide what to drop, and costs nothing to compute."""
+        size = len(message.get("content") or "")
+        calls = message.get("tool_calls")
+        if calls:
+            try:
+                size += len(json.dumps(calls, default=str))
+            except (TypeError, ValueError):
+                size += 200
+        return size // 4 + 4  # a few tokens of role and framing per message
+
+    def _trim_history(self):
+        """Drops the oldest exchanges once the transcript outgrows its budget.
+
+        Nothing trimmed here is lost: every message is in chat_history, and
+        `search_past_conversations` reaches all of it. This only decides what
+        is worth re-sending on every single request.
+
+        The care needed is in *where* the cut lands. A "tool" message is only
+        valid if the assistant message that requested it is still above it, so
+        dropping a tool_calls message while keeping its results produces a
+        history the API rejects outright — a hard failure in the middle of a
+        conversation. The cut is therefore pushed forward past any orphaned
+        results before it is applied.
+        """
+        budget = self.history_budget()
+        if budget <= 0 or len(self.messages) <= 2:
+            return
+
+        sizes = [self._message_size(m) for m in self.messages]
+        # The budget covers the conversation only. The system prompt is fixed
+        # overhead — on the local path it is some 12,000 tokens of embedded
+        # tool descriptions — and counting it here would mean trimming the
+        # entire conversation away to make room for something untrimmable.
+        conversation = sum(sizes[1:])
+        if conversation <= budget:
+            return
+
+        cut = 1
+        while cut < len(self.messages) and conversation > budget:
+            conversation -= sizes[cut]
+            cut += 1
+
+        while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
+            cut += 1
+
+        dropped = cut - 1
+        if dropped <= 0:
+            return
+
+        self.messages = [self.messages[0]] + self.messages[cut:]
+        print(f"[Brain] conversation reached ~{sum(sizes[1:])} tokens; dropped "
+              f"the {dropped} oldest messages (still searchable via "
+              f"search_past_conversations)")
+
+    def _try_alias(self, user_text: str):
+        """Runs a fixed-meaning command outright, or returns None to use the model.
+
+        "Pause" cost fifty seconds on this machine because every utterance went
+        to a local model running mostly on CPU. Nothing about "pause" needs a
+        model, and by the time it answered the moment had gone.
+
+        The exchange is still written into the history, so a follow-up question
+        about what just happened has something to read.
+        """
+        if not config.get("aliases.enabled", True):
+            return None
+
+        try:
+            from ultron import aliases
+
+            match = aliases.resolve(user_text)
+        except Exception as e:
+            print(f"[Alias] lookup failed, using the model: {e}")
+            return None
+
+        if match is None:
+            return None
+
+        tool, args = match
+        # Belt and braces. The table is curated, but an alias skips the model
+        # and therefore skips the judgement that would question a bad
+        # instruction — so anything gated must never be reachable this way,
+        # whatever someone later adds to the table.
+        if tool in DESTRUCTIVE_TOOLS:
+            print(f"[Alias] refusing to shortcut '{tool}' — it needs confirmation")
+            return None
+
+        print(f"[Alias] {user_text!r} -> {tool}({args}) — no model call")
+        result = str(self._invoke_tool(tool, args))
+
+        self.db.save_message(session_id=self.session_id, role='user', message=user_text)
+        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "assistant", "content": result})
+        self.db.save_message(session_id=self.session_id, role='model', message=result)
+        return result
+
+    def note_unprompted_line(self, text: str):
+        """Records something Ultron said on its own initiative as a real turn.
+
+        Idle remarks are composed by a separate one-shot model call that never
+        touched `self.messages`, so as far as the conversation was concerned
+        they were never said. Ultron would offer to play Arijit Singh, the user
+        would answer "yes, do it", and Ultron had no idea what "it" was.
+
+        Safe to call from any thread at any moment. A reminder can fire in the
+        middle of a turn, and an assistant message dropped between a tool_calls
+        message and its results is a malformed history the API rejects — so
+        anything said mid-turn is held and flushed before the next one.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+
+        if self._in_turn:
+            self._pending_unprompted.append(text)
+            return
+
+        self.messages.append({"role": "assistant", "content": text})
+        # Also into the searchable chat log, so "what did you say earlier?"
+        # can find it the same way it finds anything else Ultron has said.
+        try:
+            self.db.save_message(session_id=self.session_id, role='model', message=text)
+        except Exception as e:
+            print(f"[Brain] could not log an unprompted line: {e}")
+
+    def _flush_unprompted(self):
+        """Adds anything said mid-turn, in the order it was said."""
+        while self._pending_unprompted:
+            held = self._pending_unprompted.pop(0)
+            self._in_turn = False
+            self.note_unprompted_line(held)
+
     def on_tool_event(self, callback):
         """Registers callback(phase, name, detail) for every tool invocation.
 
@@ -1332,6 +1991,42 @@ Your response: Let me find some great Malayalam songs for you, sir.
             return None, (f"Error: '{text}' matches {len(matches)} memories ({listed}). "
                           "Ask the user which one they mean, then use its number.")
         return matches[0], None
+
+    def _resolve_routine(self, name):
+        """Finds a routine by id or name. Returns (routine, problem)."""
+        text = str(name or "").strip().strip("#.\"'")
+        if not text:
+            return None, "Error: say which routine you mean."
+
+        items = self.db.list_routines()
+        if not items:
+            return None, "There are no routines set up yet, sir."
+
+        if text.isdigit():
+            match = next((r for r in items if r["id"] == int(text)), None)
+            if match:
+                return match, None
+            return None, f"Error: there is no routine {text}. Call list_routines."
+
+        lowered = text.lower()
+        exact = [r for r in items if r["name"].lower() == lowered]
+        if exact:
+            return exact[0], None
+        partial = [r for r in items if lowered in r["name"].lower()]
+        if not partial:
+            return None, (f"Error: no routine matches '{text}'. Call list_routines "
+                          "to see what exists.")
+        if len(partial) > 1:
+            names = ", ".join(f"'{r['name']}'" for r in partial[:5])
+            return None, (f"Error: '{text}' matches {len(partial)} routines "
+                          f"({names}). Ask the user which one they mean.")
+        return partial[0], None
+
+    def _detail_delete_routine(self, args: dict):
+        routine, problem = self._resolve_routine(args.get("name"))
+        if problem or not routine:
+            return None
+        return f"delete the routine '{routine['name']}'"
 
     def _detail_delete_memory(self, args: dict):
         """Names the actual memory on the confirmation card, not the search term."""
@@ -1423,6 +2118,12 @@ Your response: Let me find some great Malayalam songs for you, sir.
             except Exception as e:
                 print(f"[Confirm] could not describe {func_name} precisely: {e}")
 
+        if self.unattended:
+            print(f"[Confirm] {func_name} refused — running unattended")
+            return (f"Error: {func_name} cannot run inside a scheduled routine, "
+                    "because nobody is present to approve it. Report what you "
+                    "found instead, and let the user do this themselves.")
+
         if self.confirm_handler is None:
             print(f"[Confirm] {func_name} refused — no confirmation handler")
             return (f"Error: {func_name} needs the user's approval and there is "
@@ -1477,6 +2178,13 @@ Your response: Let me find some great Malayalam songs for you, sir.
         # it. With the GUI there is no console, so this lands in ultron.log.
         print(f"[Tool] {func_name}({clean_args})")
 
+        if self.unattended and func_name in SCREEN_TOOLS:
+            print(f"[Screen] {func_name} refused - running unattended")
+            return (f"Error: {func_name} drives the keyboard and mouse, so it "
+                    f"cannot run inside a scheduled routine - it would type "
+                    f"into whatever the user is working in. Report what you "
+                    f"found and let them run it themselves.")
+
         refusal = self._check_confirmation(func_name, clean_args)
         if refusal:
             return refusal
@@ -1486,14 +2194,17 @@ Your response: Let me find some great Malayalam songs for you, sir.
             result = self._run_watched(func_name, func, clean_args)
         except TimeoutError as e:
             self._emit_tool_event("end", func_name, False)
+            tool_usage.record(func_name, False)
             return f"Error: {e}"
         except Exception as e:
             self._emit_tool_event("end", func_name, False)
+            tool_usage.record(func_name, False)
             return f"Error executing {func_name}: {e}"
 
         # A tool can report failure in its return string without raising.
         ok = not (isinstance(result, str) and result.startswith("Error"))
         self._emit_tool_event("end", func_name, ok)
+        tool_usage.record(func_name, ok)
         return result
 
     def _record_usage(self, response):
@@ -1550,10 +2261,25 @@ Your response: Let me find some great Malayalam songs for you, sir.
 
     def process_input(self, user_text: str) -> str:
         """Routes user input to the appropriate handler based on the active API."""
-        if self.active_api == "localapi":
-            return self._process_input_local(user_text)
-        else:
-            return self._process_input_cloud(user_text)
+        # Anything Ultron said while the last turn was still running goes in
+        # first, so it sits before this message rather than inside the turn
+        # that was in flight.
+        self._flush_unprompted()
+        # Between turns is the only safe moment: mid-turn the history contains
+        # a tool call waiting on its results.
+        self._trim_history()
+
+        quick = self._try_alias(user_text)
+        if quick is not None:
+            return quick
+        self._in_turn = True
+        try:
+            if self.active_api == "localapi":
+                return self._process_input_local(user_text)
+            else:
+                return self._process_input_cloud(user_text)
+        finally:
+            self._in_turn = False
 
     def _process_input_local(self, user_text: str) -> str:
         """Process input using a local model with manual text-based tool calling.
@@ -1604,20 +2330,7 @@ Your response: Let me find some great Malayalam songs for you, sir.
 
             for _ in range(max_tool_rounds):
                 # Call local model WITHOUT tools/tool_choice params
-                for attempt in range(3):
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=self.selected_model,
-                            messages=messages_for_call,
-                        )
-                        if response and response.choices:
-                            self._record_usage(response)
-                            break
-                    except Exception as e:
-                        if attempt == 2:
-                            raise e
-                        import time
-                        time.sleep(2)
+                response = self.complete(messages=messages_for_call)
 
                 if not response or not response.choices:
                     return "The local AI model returned an empty response. Is Ollama running?"
@@ -1687,21 +2400,11 @@ Your response: Let me find some great Malayalam songs for you, sir.
             
             # Initial API call with retries
             t0 = _time.monotonic()
-            for attempt in range(3):
-                try:
-                    response = self.client.chat.completions.create(
-                        model=self.selected_model,
-                        messages=self.messages,
-                        tools=self.tools_schema,
-                        tool_choice="auto"
-                    )
-                    if response and response.choices:
-                        self._record_usage(response)
-                        break
-                except Exception as e:
-                    if attempt == 2:
-                        raise e
-                    _time.sleep(2)
+            response = self.complete(
+                messages=self.messages,
+                tools=self.tools_schema,
+                tool_choice="auto",
+            )
             
             print(f"[Timing] Model API call #1: {_time.monotonic() - t0:.1f}s")
             
@@ -1740,21 +2443,11 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 
                 # Call the model again with the newly added tool results (with retries)
                 t2 = _time.monotonic()
-                for attempt in range(3):
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=self.selected_model,
-                            messages=self.messages,
-                            tools=self.tools_schema,
-                            tool_choice="auto"
-                        )
-                        if response and response.choices:
-                            self._record_usage(response)
-                            break
-                    except Exception as e:
-                        if attempt == 2:
-                            raise e
-                        _time.sleep(2)
+                response = self.complete(
+                    messages=self.messages,
+                    tools=self.tools_schema,
+                    tool_choice="auto",
+                )
                 
                 print(f"[Timing] Model API call #{tool_round + 1}: {_time.monotonic() - t2:.1f}s")
                 

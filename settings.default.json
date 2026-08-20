@@ -1,15 +1,31 @@
 {
   "openrouterapi": true,
   "geminiapi": false,
+  "groqapi": false,
   "localapi": false,
   "openrouter_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "gemini_model": "gemini-2.5-flash",
+  "groq_model": "openai/gpt-oss-20b",
   "local_model": "gemma4:e2b",
   "local_api_url": "http://localhost:11434/v1",
   "microphone_active": true,
+  "speech_language": "en-IN",
+  "speech_engine": "google",
+  "vosk": {
+    "enabled": true,
+    "auto_download": true,
+    "use_for_endpointing": true,
+    "model_path": "",
+    "min_confidence": 0.0
+  },
   "llm_timeout_seconds": null,
   "truth_mode": false,
   "filter_local_tools": false,
+  "max_history_tokens": null,
+  "self_hearing_guard": true,
+  "aliases": {
+    "enabled": true
+  },
   "idle_chat": {
     "enabled": true,
     "after_minutes": 25,
