@@ -319,12 +319,9 @@ class SettingsPanel(QWidget):
 
         self.mic_check.setChecked(bool(config.get("microphone_active", True)))
         self.truth_check.setChecked(bool(config.get("truth_mode", False)))
-<<<<<<< HEAD
         self.self_hearing_check.setChecked(
             bool(config.get("self_hearing_guard", True)))
-=======
         self.live_screen_check.setChecked(bool(config.get("live_screen", False)))
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
 
         # Reflects the Startup folder, not settings.json, so read it from disk
         # without letting the signal fire back and rewrite the shortcut.
@@ -382,11 +379,8 @@ class SettingsPanel(QWidget):
         updates["local_api_url"] = self.local_url_edit.text().strip() or "http://localhost:11434/v1"
         updates["microphone_active"] = self.mic_check.isChecked()
         updates["truth_mode"] = self.truth_check.isChecked()
-<<<<<<< HEAD
         updates["self_hearing_guard"] = self.self_hearing_check.isChecked()
-=======
         updates["live_screen"] = self.live_screen_check.isChecked()
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
         updates["idle_chat.enabled"] = self.idle_check.isChecked()
         updates["idle_chat.after_minutes"] = self.idle_after_spin.value()
         updates["idle_chat.quiet_start_hour"] = self.quiet_start_spin.value()

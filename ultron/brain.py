@@ -14,12 +14,8 @@ from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
     search_spotify, adjust_volume, BrowserManager,
-<<<<<<< HEAD
-    get_system_health, write_in_notepad, send_whatsapp_message,
-    chrome_search, chrome_open, chrome_read_page,
-=======
     get_system_health, type_notes, send_whatsapp_message,
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
+    chrome_search, chrome_open, chrome_read_page,
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
     copy_file, move_file, release_stuck_keys
@@ -116,7 +112,7 @@ DESTRUCTIVE_TOOLS = {
 # it is disruptive, and unattended was only ever guarding the former.
 SCREEN_TOOLS = {
     "send_whatsapp_message",
-    "write_in_notepad",
+    "type_notes",
     "chrome_search",
     "chrome_open",
     "chrome_read_page",
@@ -309,14 +305,11 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "reschedule_routine", "last_routine_result",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
-<<<<<<< HEAD
         "add_todo", "list_todos", "complete_todo", "reopen_todo", "delete_todo",
         "snooze_reminder",
         # Always reachable: if a modifier is stuck the user cannot type
         # comfortably, so asking by voice must work whatever else is loaded.
         "release_stuck_keys",
-=======
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
     ],
     # Desktop app control + media + volume
     "system": [
@@ -2422,29 +2415,11 @@ Your response: Let me find some great Malayalam songs for you, sir.
             
             # Initial API call with retries
             t0 = _time.monotonic()
-<<<<<<< HEAD
             response = self.complete(
-                messages=self.messages,
+                messages=get_call_messages(),
                 tools=self.tools_schema,
                 tool_choice="auto",
             )
-=======
-            for attempt in range(3):
-                try:
-                    response = self.client.chat.completions.create(
-                        model=self.selected_model,
-                        messages=get_call_messages(),
-                        tools=self.tools_schema,
-                        tool_choice="auto"
-                    )
-                    if response and response.choices:
-                        self._record_usage(response)
-                        break
-                except Exception as e:
-                    if attempt == 2:
-                        raise e
-                    _time.sleep(2)
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
             
             print(f"[Timing] Model API call #1: {_time.monotonic() - t0:.1f}s")
             
@@ -2483,29 +2458,11 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 
                 # Call the model again with the newly added tool results (with retries)
                 t2 = _time.monotonic()
-<<<<<<< HEAD
                 response = self.complete(
-                    messages=self.messages,
+                    messages=get_call_messages(),
                     tools=self.tools_schema,
                     tool_choice="auto",
                 )
-=======
-                for attempt in range(3):
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=self.selected_model,
-                            messages=get_call_messages(),
-                            tools=self.tools_schema,
-                            tool_choice="auto"
-                        )
-                        if response and response.choices:
-                            self._record_usage(response)
-                            break
-                    except Exception as e:
-                        if attempt == 2:
-                            raise e
-                        _time.sleep(2)
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
                 
                 print(f"[Timing] Model API call #{tool_round + 1}: {_time.monotonic() - t2:.1f}s")
                 

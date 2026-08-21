@@ -218,7 +218,6 @@ class Config:
         """
         self._maybe_reload()
         with self._lock:
-<<<<<<< HEAD
             raw = self._keys.get(name)
 
         if isinstance(raw, str):
@@ -238,12 +237,6 @@ class Config:
                 seen.add(value)
                 keys.append(value)
         return keys
-=======
-            val = self._keys.get(name)
-            if isinstance(val, list):
-                val = val[0] if val else ""
-            return (val or "").strip()
->>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
 
     def set_key(self, name: str, value: str):
         """Stores an API key in keys.json.
