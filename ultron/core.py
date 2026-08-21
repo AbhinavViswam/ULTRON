@@ -77,7 +77,7 @@ TOOL_LABELS = {
     "adjust_volume": "adjusting the volume",
     "get_system_health": "checking system health",
     "system_power_control": "controlling power",
-    "write_in_notepad": "writing in Notepad",
+    "type_notes": "taking notes",
     "send_whatsapp_message": "sending a WhatsApp message",
     "read_clipboard": "reading the clipboard",
     "copy_to_clipboard": "copying to the clipboard",

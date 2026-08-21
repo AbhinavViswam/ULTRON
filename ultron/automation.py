@@ -866,40 +866,41 @@ def get_system_health() -> str:
     except Exception as e:
         return f"Failed to retrieve system health: {e}"
 
-def write_in_notepad(text: str, filename: str = None) -> str:
-    """Opens Notepad, types the specified text directly into the document, and saves it.
+def type_notes(text: str) -> str:
+    """Types notes directly onto the screen. It checks the active window: if VSCode is open, it creates a new file (Ctrl+N) and types there. Otherwise, it defaults to opening Notepad and typing there. It does NOT save automatically.
     Args:
         text: The content to write.
-        filename: Optional filename to save (e.g. 'notes.txt').
     """
     try:
         import time
         import pyautogui
         import pyperclip
+        import subprocess
         
-        # Open Notepad
-        subprocess.Popen(['notepad.exe'])
-        time.sleep(1.5)  # Wait for Notepad window to launch
+        try:
+            import pygetwindow as gw
+            active_window = gw.getActiveWindow()
+            title = active_window.title.lower() if active_window and active_window.title else ""
+        except Exception:
+            title = ""
         
+        if "visual studio code" in title or "vscode" in title:
+            # We are in VSCode. Open a new file (Ctrl+N)
+            pyautogui.hotkey('ctrl', 'n')
+            time.sleep(0.5)
+        else:
+            # Open Notepad
+            subprocess.Popen(['notepad.exe'])
+            time.sleep(1.5)  # Wait for Notepad window to launch
+            
         # Copy text to clipboard and paste for instant, error-free typing
         pyperclip.copy(text)
         pyautogui.hotkey('ctrl', 'v')
         time.sleep(0.5)
         
-        if filename:
-            # Save file
-            pyautogui.hotkey('ctrl', 's')
-            time.sleep(1.0)
-            base_dir = os.path.expanduser("~/Desktop")
-            full_path = os.path.join(base_dir, filename)
-            pyperclip.copy(full_path)
-            pyautogui.hotkey('ctrl', 'v')
-            pyautogui.press('enter')
-            return f"Successfully typed text in Notepad and saved as '{filename}' on your Desktop."
-            
-        return "Successfully typed text into Notepad."
+        return "Successfully typed notes onto the screen."
     except Exception as e:
-        return f"Failed to write in Notepad: {e}"
+        return f"Failed to type notes: {e}"
     finally:
         # A hotkey that failed between press and release would leave Ctrl down
         # across the whole desktop.

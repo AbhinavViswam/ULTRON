@@ -14,8 +14,12 @@ from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
     search_spotify, adjust_volume, BrowserManager,
+<<<<<<< HEAD
     get_system_health, write_in_notepad, send_whatsapp_message,
     chrome_search, chrome_open, chrome_read_page,
+=======
+    get_system_health, type_notes, send_whatsapp_message,
+>>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
     read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
     empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
     copy_file, move_file, release_stuck_keys
@@ -137,7 +141,7 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 30
 
 TOOL_TIMEOUT_SECONDS = {
     # Drives other apps through the keyboard, at human speed.
-    "write_in_notepad": 180,
+    "type_notes": 180,
     "send_whatsapp_message": 180,
     # Walks the filesystem.
     "find_files": 60,
@@ -305,11 +309,14 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "reschedule_routine", "last_routine_result",
         "set_reminder", "set_reminder_at", "set_recurring_reminder",
         "set_recurring_reminder_at", "list_reminders", "delete_reminder",
+<<<<<<< HEAD
         "add_todo", "list_todos", "complete_todo", "reopen_todo", "delete_todo",
         "snooze_reminder",
         # Always reachable: if a modifier is stuck the user cannot type
         # comfortably, so asking by voice must work whatever else is loaded.
         "release_stuck_keys",
+=======
+>>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
     ],
     # Desktop app control + media + volume
     "system": [
@@ -336,15 +343,15 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
     # File system, clipboard, documents, notepad
     "files": [
+        "read_clipboard", "copy_to_clipboard", "type_notes",
         "find_files", "read_file_content", "create_file", "delete_file",
         "copy_file", "move_file", "list_directory", "open_folder",
-        "read_clipboard", "copy_to_clipboard", "write_in_notepad",
         "read_document", "get_selected_file_in_explorer",
         "get_current_explorer_folder", "list_current_explorer_folder",
     ],
     # System health, power, disk cleanup
     "system_health": [
-        "get_system_health", "empty_recycle_bin", "clean_temp_files",
+        "get_system_health", "empty_recycle_bin", 
         "system_power_control", "screen_capture",
     ],
     # Gmail
@@ -1252,7 +1259,6 @@ class Brain:
             "get_system_health": get_system_health,
             "system_power_control": system_power_control,
             "empty_recycle_bin": empty_recycle_bin,
-            "clean_temp_files": clean_temp_files,
             # ── Screen ────────────────────────────────────────────────────
             "screen_read": screen_read,
             "screen_read_detailed": screen_read_detailed,
@@ -1277,7 +1283,7 @@ class Brain:
             "browser_scroll": browser_scroll,
             "browser_close": browser_close,
             # ── Files & Clipboard ─────────────────────────────────────────
-            "write_in_notepad": write_in_notepad,
+            "type_notes": type_notes,
             "read_clipboard": read_clipboard,
             "copy_to_clipboard": copy_to_clipboard,
             "find_files": find_files,
@@ -1286,7 +1292,6 @@ class Brain:
             "delete_file": delete_file,
             "copy_file": copy_file,
             "move_file": move_file,
-            "release_stuck_keys": release_stuck_keys,
             "list_directory": list_directory,
             "open_folder": open_folder,
             "get_selected_file_in_explorer": get_selected_file_in_explorer,
@@ -1428,16 +1433,16 @@ WHAT `search_spotify` ACTUALLY DOES: it opens Spotify showing the search results
 - If you need to find where something is on screen, use `screen_find`.
 - To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - SYSTEM HEALTH: Use `get_system_health` to check CPU, RAM, Battery %, and Disk storage space.
-- WRITE IN NOTEPAD: Use `write_in_notepad` to type notes or text directly into Notepad.
+- TAKE NOTES: Use `type_notes` whenever the user asks to "take notes", "write this down", or type text onto the screen. It will automatically type into VSCode if it's active, or open Notepad by default.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
 - CLIPBOARD: Use `read_clipboard` to inspect copied text, and `copy_to_clipboard` to copy any text, URL, link, or note directly to the Windows Clipboard for the user.
 - FILE & FOLDER CONTROL: Use `find_files` to locate files, `read_file_content` to read text files, `create_file` to create or overwrite text files (ALWAYS prefer this for saving text — it's fast and reliable), `delete_file` to delete files, `copy_file` to copy files or folders, `move_file` to move files or folders, `list_directory` to list folder contents, and `open_folder` to open a folder directly in Windows File Explorer (e.g. 'Downloads').
-- WRITING TEXT: To save text to a file silently, use `create_file`. Only use `write_in_notepad` when the user explicitly wants to SEE Notepad open with the text visible on screen.
+- WRITING TEXT: To save text to a file silently, use `create_file`. Only use `type_notes` when the user explicitly asks you to take notes or wants to SEE the text visible on screen.
 - SELECTED FILES: If the user says "this file", "these files", or "the selected file", use `get_selected_file_in_explorer` to find out which files they currently have highlighted in Windows File Explorer.
 - CURRENT FOLDER: If the user says "this folder", "here", "the folder I am in", or "the current folder", use `get_current_explorer_folder` to find out exactly where they are looking, or `list_current_explorer_folder` to see what is in it. Never guess a path when these can tell you.
 - READING DOCUMENTS: Use `read_document` to read PDF, Word (DOCX), and image files (PNG, JPG, BMP, TIFF, WEBP). For images, it extracts text using OCR. If a PDF/DOCX is long, call it first without a page, then use `page=1`, `page=2`, etc. to read chunk by chunk.
-- RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely, and `clean_temp_files` to remove temporary junk files from %TEMP% folder to free up space.
-- DESTRUCTIVE ACTIONS: Ultron itself asks the user to approve anything destructive (`delete_file`, `empty_recycle_bin`, `clean_temp_files`, shutting down, deleting reminders or workflows) — you do not need a confirmation argument, and you cannot approve on the user's behalf. Call the tool when the user asks for it; a prompt appears and the tool runs only if they agree. If the result says the user did not approve, tell them plainly that nothing was changed and do not try again.
+- RECYCLE BIN & DISK CLEANUP: Use `empty_recycle_bin` to empty the Windows Recycle Bin completely.
+- DESTRUCTIVE ACTIONS: Ultron itself asks the user to approve anything destructive (`delete_file`, `empty_recycle_bin`, shutting down, deleting reminders or workflows) — you do not need a confirmation argument, and you cannot approve on the user's behalf. Call the tool when the user asks for it; a prompt appears and the tool runs only if they agree. If the result says the user did not approve, tell them plainly that nothing was changed and do not try again.
 - `delete_file` moves the file to the Recycle Bin, so it can be restored. Say so when you report it. `empty_recycle_bin` is permanent.
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, schedule system shutdown, or cancel a scheduled shutdown.
 - GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
@@ -1711,7 +1716,7 @@ Your response: Let me find some great Malayalam songs for you, sir.
 - You can call multiple tools by including multiple <tool_call> blocks.
 - After a tool runs, you will receive its result in a message. Use the result to answer the user.
 - If no tool is needed (e.g., general chat or a question), just respond normally WITHOUT any <tool_call> block.
-- Destructive actions (delete_file, empty_recycle_bin, clean_temp_files, shutdown) are confirmed by Ultron itself, not by you. Call the tool; the user is asked, and it only runs if they agree.
+- Destructive actions (delete_file, empty_recycle_bin, shutdown) are confirmed by Ultron itself, not by you. Call the tool; the user is asked, and it only runs if they agree.
 - To remember facts, use save_memory. To recall facts about the user, use search_memories FIRST.
 - For reminders, follow the REMINDERS rules above: clock times use set_reminder_at / set_recurring_reminder_at, durations use set_reminder."""
         if truth_mode:
@@ -2314,6 +2319,10 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 now_str, self.truth_mode, tools_text=tools_text
             )
 
+            if config.get("live_screen", False):
+                from ultron.plugins.screen_plugin import screen_read
+                targeted_sys_prompt += f"\n\n# CURRENT SCREEN CONTEXT\n{screen_read()}"
+
             # Replace only the system message; preserve the rest of the history
             messages_for_call = [
                 {"role": "system", "content": targeted_sys_prompt},
@@ -2395,16 +2404,47 @@ Your response: Let me find some great Malayalam songs for you, sir.
             import time as _time
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
             
+            screen_context_text = ""
+            if config.get("live_screen", False):
+                from ultron.plugins.screen_plugin import screen_read
+                screen_context_text = f"\n\n# CURRENT SCREEN CONTEXT\n{screen_read()}"
+
+            def get_call_messages():
+                msgs = list(self.messages)
+                if screen_context_text and msgs and msgs[0].get("role") == "system":
+                    sys_msg = dict(msgs[0])
+                    sys_msg["content"] = str(sys_msg.get("content", "")) + screen_context_text
+                    msgs[0] = sys_msg
+                return msgs
+            
             # Append user message
             self.messages.append({"role": "user", "content": user_text})
             
             # Initial API call with retries
             t0 = _time.monotonic()
+<<<<<<< HEAD
             response = self.complete(
                 messages=self.messages,
                 tools=self.tools_schema,
                 tool_choice="auto",
             )
+=======
+            for attempt in range(3):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.selected_model,
+                        messages=get_call_messages(),
+                        tools=self.tools_schema,
+                        tool_choice="auto"
+                    )
+                    if response and response.choices:
+                        self._record_usage(response)
+                        break
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    _time.sleep(2)
+>>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
             
             print(f"[Timing] Model API call #1: {_time.monotonic() - t0:.1f}s")
             
@@ -2443,11 +2483,29 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 
                 # Call the model again with the newly added tool results (with retries)
                 t2 = _time.monotonic()
+<<<<<<< HEAD
                 response = self.complete(
                     messages=self.messages,
                     tools=self.tools_schema,
                     tool_choice="auto",
                 )
+=======
+                for attempt in range(3):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.selected_model,
+                            messages=get_call_messages(),
+                            tools=self.tools_schema,
+                            tool_choice="auto"
+                        )
+                        if response and response.choices:
+                            self._record_usage(response)
+                            break
+                    except Exception as e:
+                        if attempt == 2:
+                            raise e
+                        _time.sleep(2)
+>>>>>>> 8d4de01 (feat: implement agent_monitor_plugin to track coding agent activity via local HTTP hook events)
                 
                 print(f"[Timing] Model API call #{tool_round + 1}: {_time.monotonic() - t2:.1f}s")
                 

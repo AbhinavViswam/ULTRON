@@ -547,7 +547,7 @@ def detect_ide():
                 if needle in name:
                     return friendly
     except Exception as e:
-        print(f"[Agent Monitor] could not identify the parent IDE: {e}")
+        print(f"[Agent Monitor] could not identify the parent IDE: {{e}}")
     # Fallback only if psutil is unavailable. Note every VSCode fork sets
     # TERM_PROGRAM=vscode, so this cannot distinguish them — it is a last resort.
     if (os.environ.get("TERM_PROGRAM") or "").lower() == "vscode":
@@ -581,7 +581,7 @@ def main():
         }}).encode("utf-8")
         send(body)
     except Exception as e:
-        print(f"[Agent Monitor] could not deliver the hook event: {e}")
+        print(f"[Agent Monitor] could not deliver the hook event: {{e}}")
 
 main()
 sys.exit(0)
