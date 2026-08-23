@@ -609,7 +609,6 @@ class UltronCore:
 
     def stop_microphone(self):
         if self.listener:
-            self.speaker.wait()
             self.listener.stop()
             self.listener = None
             self._emit_level(0.0)

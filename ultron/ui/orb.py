@@ -109,9 +109,16 @@ class Orb(QWidget):
         self._timer.stop()
 
     def _tick(self):
+        # Variable-rate timer to save CPU when completely idle
+        target_ms = 66 if (self.state == STATE_IDLE and self._level == 0.0 and self._smoothed < 0.01) else 33
+        if self._timer.interval() != target_ms:
+            self._timer.setInterval(target_ms)
+            
+        delta_time = target_ms / 33.0
+            
         rate = LEVEL_ATTACK if self._level > self._smoothed else LEVEL_RELEASE
-        self._smoothed += (self._level - self._smoothed) * rate
-        self._phase = (self._phase + 0.03) % (math.pi * 2)
+        self._smoothed += (self._level - self._smoothed) * rate * delta_time
+        self._phase = (self._phase + (0.03 * delta_time)) % (math.pi * 2)
 
         # Loud speech while listening throws off a ring, so the orb visibly
         # reacts to *your* voice rather than just glowing.

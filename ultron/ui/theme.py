@@ -7,16 +7,16 @@ than inline so the whole window can be retuned from a single place.
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 
-# Core palette
-BG = "#0d1117"
-PANEL = "#151b24"
-PANEL_LIGHT = "#1c2530"
-BORDER = "#243040"
-ACCENT = "#f97316"
-ACCENT_DIM = "#c2410c"
-TEXT = "#e6edf3"
-TEXT_DIM = "#8b98a8"
-USER_BUBBLE = "#1e3a45"
+# Core palette - Crimson & Carbon Theme
+BG = "#121212"
+PANEL = "#1a1a1a"
+PANEL_LIGHT = "#242424"
+BORDER = "#333333"
+ACCENT = "#FF2A2A"
+ACCENT_DIM = "#CC0000"
+TEXT = "#e0e0e0"
+TEXT_DIM = "#888888"
+USER_BUBBLE = "#3a1c1c"
 DANGER = "#f87171"
 SUCCESS = "#4ade80"
 WARNING = "#fbbf24"
@@ -133,12 +133,12 @@ QPushButton:disabled {{
 QPushButton#primary {{
     background: {ACCENT_DIM};
     border: 1px solid {ACCENT_DIM};
-    color: #04191d;
+    color: #ffffff;
     font-weight: 600;
 }}
 QPushButton#primary:hover {{
     background: {ACCENT};
-    color: #04191d;
+    color: #ffffff;
 }}
 
 QPushButton#iconButton {{

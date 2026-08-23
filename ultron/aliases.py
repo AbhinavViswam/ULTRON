@@ -27,6 +27,7 @@ FILLER = {
     "please", "can", "could", "would", "you", "u", "hey", "ok", "okay",
     "ultron", "just", "now", "the", "a", "an", "my", "for", "me", "to",
     "some", "it", "that", "this", "and", "then", "go", "ahead",
+    "yes", "yeah", "yep", "sure"
 }
 
 # phrase -> (tool name, arguments). Only phrases with exactly one plausible
@@ -102,6 +103,18 @@ _add("list_memories", {},
      "what do you know about me")
 _add("get_current_explorer_folder", {},
      "current folder", "what folder am i in", "which folder is open")
+
+# --- hardware / modes ----------------------------------------------------
+_add("toggle_gesture_control", {"activate": True},
+     "activate gesture control", "turn on gesture control", "start gesture control",
+     "activate gesture controls", "turn on gesture controls", "start gesture controls",
+     "activate virtual mouse", "turn on virtual mouse", "start virtual mouse",
+     "activate vision control", "turn on vision control", "start vision control")
+_add("toggle_gesture_control", {"activate": False},
+     "deactivate gesture control", "turn off gesture control", "stop gesture control",
+     "deactivate gesture controls", "turn off gesture controls", "stop gesture controls",
+     "deactivate virtual mouse", "turn off virtual mouse", "stop virtual mouse",
+     "deactivate vision control", "turn off vision control", "stop vision control")
 
 
 def resolve(text: str):

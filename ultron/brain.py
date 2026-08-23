@@ -317,9 +317,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
     # Screen reading / OCR / window awareness
     "screen": [
-        "screen_read", "screen_read_detailed", "screen_capture",
-        "screen_read_ocr", "screen_find", "screen_get_resolution",
-        "screen_get_active_window", "screen_get_mouse_position",
+        "start_watcher", "stop_watcher", "watch_screen_and_act"
     ],
     # File system, clipboard, documents, notepad
     "files": [
@@ -1619,10 +1617,16 @@ Your response: Closing Chrome immediately, sir.
 {{"name": "close_application", "arguments": {{"app_name": "chrome"}}}}
 </tool_call>
 
-User: "Close Chrome"
-Your response: Closing Chrome immediately, sir.
+User: "Activate the gesture controls"
+Your response: Activating gesture controls now, sir.
 <tool_call>
-{{"name": "close_application", "arguments": {{"app_name": "chrome"}}}}
+{{"name": "toggle_gesture_control", "arguments": {{"activate": true}}}}
+</tool_call>
+
+User: "Stop gesture control"
+Your response: Deactivating gesture controls, sir.
+<tool_call>
+{{"name": "toggle_gesture_control", "arguments": {{"activate": false}}}}
 </tool_call>
 
 User: "Search Google for latest news"
@@ -1634,7 +1638,7 @@ Your response: Right away, sir.
 User: "What is on my screen right now?"
 Your response: Let me take a look at your screen, sir.
 <tool_call>
-{{"name": "screen_read", "arguments": {{}}}}
+{{"name": "watch_screen_and_act", "arguments": {{"goal": "tell me what is on the screen"}}}}
 </tool_call>
 
 User: "Set a reminder at 10:20 am daily for the RateUp meeting"

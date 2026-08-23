@@ -3,6 +3,7 @@ import mediapipe as mp
 import threading
 import time
 import pyautogui
+pyautogui.FAILSAFE = False
 
 import os
 import urllib.request
@@ -78,6 +79,15 @@ class GestureController:
         last_move_x = None
         last_move_y = None
         mouse_sensitivity = 1.2 # Adjust this to change how far the cursor moves
+        # Pinch debounce and click vs drag tracking
+        left_pinch_release_counter = 0
+        right_pinch_release_counter = 0
+        left_pinch_start_time = 0
+        right_pinch_start_time = 0
+        left_drag_started = False
+        right_drag_started = False
+        left_last_click_time = 0
+        right_last_click_time = 0
         
         # Scroll tracking
         last_scroll_y = None
@@ -101,6 +111,7 @@ class GestureController:
         )
         face_detector = vision.FaceDetector.create_from_options(face_options)
         
+        frame_count = 0
         try:
             while self.active:
                 ret, frame = self.cap.read()
@@ -115,13 +126,17 @@ class GestureController:
                 # Convert to MediaPipe Image
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-                # --- 1. Face Presence Detection ---
-                face_results = face_detector.detect(mp_image)
-                if face_results.detections:
-                    last_presence = time.time()
-                else:
-                    if time.time() - last_presence > 300: # 5 minutes away
-                        pass # Could trigger an event here, but user said no auto-lock
+                # --- 1. Face Presence Detection (Throttled to save CPU) ---
+                frame_count += 1
+                if frame_count % 15 == 0:
+                    face_results = face_detector.detect(mp_image)
+                    if face_results.detections:
+                        time_away = time.time() - last_presence
+                        if time_away > 300: # 5 minutes away
+                            from ultron.config import config
+                            if config.get("auto_welcome", False):
+                                self.core.say("Welcome back, sir.")
+                        last_presence = time.time()
 
                 # --- 2. Virtual Mouse (Hand Tracking) ---
                 hand_results = hand_detector.detect(mp_image)
@@ -146,16 +161,61 @@ class GestureController:
                         is_left_pinching = dist_left < 0.05
                         is_right_pinching = dist_right < 0.05
                         
-                        if is_left_pinching and not was_left_pinching:
-                            pyautogui.click(_pause=False)
-                        elif is_right_pinching and not was_right_pinching:
-                            pyautogui.click(button='right', _pause=False)
-                            
-                        was_left_pinching = is_left_pinching
-                        was_right_pinching = is_right_pinching
+                        if is_left_pinching:
+                            left_pinch_release_counter = 0
+                            if not was_left_pinching:
+                                left_pinch_start_time = time.time()
+                                was_left_pinching = True
+                                left_drag_started = False
+                            else:
+                                # If held for > 0.4 seconds, initiate a drag
+                                if time.time() - left_pinch_start_time > 0.4 and not left_drag_started:
+                                    pyautogui.mouseDown(button='left', _pause=False)
+                                    left_drag_started = True
+                        else:
+                            if was_left_pinching:
+                                left_pinch_release_counter += 1
+                                if left_pinch_release_counter >= 3:
+                                    if left_drag_started:
+                                        pyautogui.mouseUp(button='left', _pause=False)
+                                    else:
+                                        if time.time() - left_last_click_time < 0.4:
+                                            pyautogui.doubleClick(button='left', _pause=False)
+                                            left_last_click_time = 0
+                                        else:
+                                            pyautogui.click(button='left', _pause=False)
+                                            left_last_click_time = time.time()
+                                    was_left_pinching = False
+                                    left_drag_started = False
+                                    
+                        if is_right_pinching:
+                            right_pinch_release_counter = 0
+                            if not was_right_pinching:
+                                right_pinch_start_time = time.time()
+                                was_right_pinching = True
+                                right_drag_started = False
+                            else:
+                                if time.time() - right_pinch_start_time > 0.4 and not right_drag_started:
+                                    pyautogui.mouseDown(button='right', _pause=False)
+                                    right_drag_started = True
+                        else:
+                            if was_right_pinching:
+                                right_pinch_release_counter += 1
+                                if right_pinch_release_counter >= 3:
+                                    if right_drag_started:
+                                        pyautogui.mouseUp(button='right', _pause=False)
+                                    else:
+                                        if time.time() - right_last_click_time < 0.4:
+                                            pyautogui.doubleClick(button='right', _pause=False)
+                                            right_last_click_time = 0
+                                        else:
+                                            pyautogui.click(button='right', _pause=False)
+                                            right_last_click_time = time.time()
+                                    was_right_pinching = False
+                                    right_drag_started = False
                         
-                        # 1. Scroll (3 Fingers: Index, Middle, Ring up)
-                        if is_index_up and is_middle_up and is_ring_up and not is_pinky_up:
+                        # 1. Scroll (3 Fingers: Index, Middle, Ring up AND not pinching)
+                        if is_index_up and is_middle_up and is_ring_up and not is_pinky_up and not is_left_pinching and not is_right_pinching:
                             if last_scroll_y is not None:
                                 delta_y = index_tip.y - last_scroll_y
                                 scroll_amount = int(-delta_y * screen_h * 1.5) # Sensitivity multiplier
@@ -165,11 +225,12 @@ class GestureController:
                             else:
                                 last_scroll_y = index_tip.y
                             
-                        # 2. Move (2 Fingers: Index, Middle up)
-                        elif is_index_up and is_middle_up and not is_ring_up and not is_pinky_up:
+                        # 2. Move (2 Fingers: Index, Middle up OR Dragging)
+                        elif ((is_index_up and is_middle_up and not is_ring_up and not is_pinky_up) and not is_left_pinching and not is_right_pinching) or left_drag_started or right_drag_started:
                             last_scroll_y = None # Reset scroll anchor
                             
                             # Smooth the raw camera coordinates first
+                            smoothing_factor = 0.25 # Original smooth factor
                             if smooth_x == 0 and smooth_y == 0:
                                 smooth_x = index_tip.x
                                 smooth_y = index_tip.y
@@ -195,10 +256,42 @@ class GestureController:
                             last_scroll_y = None # Reset scroll anchor
                             last_move_x = None
                             last_move_y = None
+                else:
+                    if was_left_pinching:
+                        if left_drag_started:
+                            pyautogui.mouseUp(button='left', _pause=False)
+                        else:
+                            if time.time() - left_last_click_time < 0.4:
+                                pyautogui.doubleClick(button='left', _pause=False)
+                                left_last_click_time = 0
+                            else:
+                                pyautogui.click(button='left', _pause=False)
+                                left_last_click_time = time.time()
+                        was_left_pinching = False
+                        left_drag_started = False
+                    if was_right_pinching:
+                        if right_drag_started:
+                            pyautogui.mouseUp(button='right', _pause=False)
+                        else:
+                            if time.time() - right_last_click_time < 0.4:
+                                pyautogui.doubleClick(button='right', _pause=False)
+                                right_last_click_time = 0
+                            else:
+                                pyautogui.click(button='right', _pause=False)
+                                right_last_click_time = time.time()
+                        was_right_pinching = False
+                        right_drag_started = False
+                    last_scroll_y = None
+                    last_move_x = None
+                    last_move_y = None
 
-                # Small sleep to yield CPU
-                time.sleep(0.03) # ~30fps max
+                # Yield a tiny bit of CPU but allow full 30 FPS camera speed
+                time.sleep(0.01)
         finally:
+            if was_left_pinching and left_drag_started:
+                pyautogui.mouseUp(button='left', _pause=False)
+            if was_right_pinching and right_drag_started:
+                pyautogui.mouseUp(button='right', _pause=False)
             hand_detector.close()
             face_detector.close()
                 

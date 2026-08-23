@@ -130,11 +130,12 @@ class SettingsPanel(QWidget):
         self.vision_provider_combo = QComboBox()
         for label, value in PROVIDER_CHOICES:
             self.vision_provider_combo.addItem(label, value)
+        self.vision_provider_combo.currentIndexChanged.connect(self._on_vision_provider_changed)
         # Default to same as main or specific vision option
         provider_form.addRow("Vision Provider", self.vision_provider_combo)
 
         self.vision_model_edit = QLineEdit()
-        self.vision_model_edit.setPlaceholderText("e.g. moondream or minicpm-v")
+        self.vision_model_edit.setPlaceholderText("Default: moondream")
         provider_form.addRow("Vision Model", self.vision_model_edit)
 
         form.addLayout(provider_form)
@@ -196,6 +197,9 @@ class SettingsPanel(QWidget):
         form.addWidget(self.truth_check)
         self.live_screen_check = QCheckBox("Live screen awareness (adds ~1s latency)")
         form.addWidget(self.live_screen_check)
+
+        self.auto_welcome_check = QCheckBox("Welcome me back when I return to the camera")
+        form.addWidget(self.auto_welcome_check)
 
         self.startup_check = QCheckBox("Start Ultron when Windows starts")
         # Applied immediately rather than on Save: it writes a shortcut to the
@@ -322,12 +326,15 @@ class SettingsPanel(QWidget):
         self.groq_key.setText(config.get_key("groq"))
         self.vision_key.setText(config.get_key("vision"))
         self._show_spare_keys()
+        
+        self._on_vision_provider_changed()
 
         self.mic_check.setChecked(bool(config.get("microphone_active", True)))
         self.truth_check.setChecked(bool(config.get("truth_mode", False)))
         self.self_hearing_check.setChecked(
             bool(config.get("self_hearing_guard", True)))
         self.live_screen_check.setChecked(bool(config.get("live_screen", False)))
+        self.auto_welcome_check.setChecked(bool(config.get("auto_welcome", False)))
 
         # Reflects the Startup folder, not settings.json, so read it from disk
         # without letting the signal fire back and rewrite the shortcut.
@@ -384,6 +391,7 @@ class SettingsPanel(QWidget):
         updates["truth_mode"] = self.truth_check.isChecked()
         updates["self_hearing_guard"] = self.self_hearing_check.isChecked()
         updates["live_screen"] = self.live_screen_check.isChecked()
+        updates["auto_welcome"] = self.auto_welcome_check.isChecked()
         updates["idle_chat.enabled"] = self.idle_check.isChecked()
         updates["idle_chat.after_minutes"] = self.idle_after_spin.value()
         updates["idle_chat.quiet_start_hour"] = self.quiet_start_spin.value()
@@ -413,6 +421,17 @@ class SettingsPanel(QWidget):
         # Show the model already configured for the newly selected provider.
         self.model_edit.setText(config.model_for(provider))
         self._apply_provider_visibility(provider)
+        
+    def _on_vision_provider_changed(self):
+        provider = self.vision_provider_combo.currentData()
+        if provider == "openrouterapi":
+            self.vision_model_edit.setText("nvidia/nemotron-nano-12b-v2-vl:free")
+        elif provider == "localapi":
+            self.vision_model_edit.setText("moondream")
+        elif provider == "geminiapi":
+            self.vision_model_edit.setText("gemini-1.5-flash")
+        else:
+            self.vision_model_edit.setText("")
 
     def _apply_provider_visibility(self, provider: str):
         is_local = provider == "localapi"

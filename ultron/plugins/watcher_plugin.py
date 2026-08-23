@@ -50,7 +50,7 @@ def _watcher_loop():
                 
                 # Convert to base64
                 buffered = io.BytesIO()
-                img.thumbnail((1920, 1080)) # Downscale slightly if needed to save RAM
+                img.thumbnail((1280, 720)) # Downscale to save RAM
                 img.save(buffered, format="JPEG", quality=70)
                 img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 
@@ -60,7 +60,7 @@ def _watcher_loop():
                 })
             except Exception as e:
                 print(f"[Watcher] Error capturing frame: {e}")
-            time.sleep(1.0) # 1 frame per second
+            time.sleep(3.0) # 1 frame every 3 seconds
 
 def start_watcher():
     global _watcher_running, _watcher_thread
@@ -192,6 +192,12 @@ def _call_vision_model(prompt: str, image_b64: str) -> str:
         client = OpenAI(base_url=api_url, api_key="ollama")
     else:
         # OpenRouter or Gemini
+        if not model:
+            if provider == "openrouterapi":
+                model = "nvidia/nemotron-nano-12b-v2-vl:free"
+            elif provider == "geminiapi":
+                model = "gemini-1.5-flash"
+                
         # Prefer the dedicated vision key, fallback to the provider's key
         key_name = "openrouter" if provider == "openrouterapi" else "google"
         api_key = config.get_key("vision") or config.get_key(key_name)
