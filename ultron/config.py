@@ -52,7 +52,6 @@ BUILTIN_DEFAULTS = {
     "microphone_active": True,
     "truth_mode": False,
     "cron_jobs": {},
-    "agent_monitor": {"enabled": True},
 }
 
 # Which API keys each provider requires, for readiness checks.

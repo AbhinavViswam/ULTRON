@@ -16,8 +16,8 @@
   "truth_mode": true,
   "live_screen": false,
   "agent_monitor": {
-    "enabled": true,
-    "port": 8784,
+    "enabled": false,
+    "port": 8808,
     "alert_mode": "voice",
     "min_run_seconds": 10,
     "escalate_seconds": 120,
@@ -25,21 +25,37 @@
     "pending_tool_seconds": 10
   },
   "overlay_position": {
-    "x": 1110,
-    "y": 429
+    "x": 1046,
+    "y": 265
   },
   "local_api_url": "http://localhost:11434/v1",
   "filter_local_tools": false,
   "idle_chat": {
     "enabled": true,
-    "after_minutes": 25,
+    "after_minutes": 20,
     "quiet_start_hour": 22,
     "quiet_end_hour": 8,
     "silent_when_mic_off": false,
-    "silent_in_fullscreen": false,
+    "silent_in_fullscreen": true,
     "give_up_after": 0
   },
   "groqapi": false,
   "groq_model": "openai/gpt-oss-20b",
-  "self_hearing_guard": true
+  "self_hearing_guard": true,
+  "speech_language": "en-IN",
+  "speech_engine": "google",
+  "vosk": {
+    "enabled": true,
+    "auto_download": true,
+    "use_for_endpointing": true,
+    "model_path": "",
+    "min_confidence": 0
+  },
+  "llm_timeout_seconds": null,
+  "max_history_tokens": null,
+  "aliases": {
+    "enabled": true
+  },
+  "vision_model": "nvidia/llama-nemotron-rerank-vl-1b-v2:free",
+  "vision_provider": "openrouterapi"
 }

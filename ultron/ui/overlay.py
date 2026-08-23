@@ -17,10 +17,11 @@ from PySide6.QtWidgets import (
 from ultron.config import config
 from ultron.core import STATE_IDLE, STATE_TOOL
 from ultron.ui import theme
-from ultron.ui.cards import CardStack, ConfirmCard, InputCard
+from ultron.ui.cards import CardStack, ConfirmCard, InputCard, ToolContainerWindow
 from ultron.ui.orb import Orb, OrbLabel
 from ultron.ui.routines_window import RoutinesWindow
 from ultron.ui.settings_window import SettingsWindow
+from ultron.ui.tool_usage_window import ToolUsageWindow
 
 SCREEN_MARGIN = 34
 # Space between the orb and the nearest card.
@@ -71,6 +72,7 @@ class OrbOverlay(QWidget):
         self.cards = CardStack()
         self.input_card = InputCard()
         self.input_card.submitted.connect(self._on_submitted)
+        self.tool_container = ToolContainerWindow()
         self.settings_window = SettingsWindow()
         self.settings_window.settings_saved.connect(self._on_settings_saved)
         # Built with callables rather than the core itself: the window exists
@@ -79,6 +81,9 @@ class OrbOverlay(QWidget):
         self.routines_window = RoutinesWindow(
             lambda: self.core.brain.db if self.core else None,
             self._run_routine_now,
+        )
+        self.tool_usage_window = ToolUsageWindow(
+            get_db=lambda: self.core.brain.db if self.core else None
         )
 
         self._connect_signals()
@@ -177,6 +182,10 @@ class OrbOverlay(QWidget):
     def moveEvent(self, event):
         super().moveEvent(event)
         self._sync_anchor()
+        if hasattr(self, 'tool_container') and self.tool_container.isVisible():
+            # Keep it anchored to the orb when dragging
+            tool_name = self.tool_container._tool_label.text().rstrip('.')
+            self.tool_container.show_tool(tool_name, self.frameGeometry())
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -280,6 +289,10 @@ class OrbOverlay(QWidget):
         settings_action.triggered.connect(self._show_settings)
         self.menu.addAction(settings_action)
 
+        tool_history_action = QAction("Tool History", self)
+        tool_history_action.triggered.connect(self._show_tool_history)
+        self.menu.addAction(tool_history_action)
+
         self.menu.addSeparator()
         quit_action = QAction("Quit Ultron", self)
         quit_action.triggered.connect(self.quit_app)
@@ -339,6 +352,9 @@ class OrbOverlay(QWidget):
 
     def _show_routines(self):
         self.routines_window.show_panel()
+        
+    def _show_tool_history(self):
+        self.tool_usage_window.show_panel()
 
     def _run_routine_now(self, name: str):
         """Queues a routine, the same way asking for it out loud would."""
@@ -398,9 +414,14 @@ class OrbOverlay(QWidget):
 
     def _on_state_changed(self, state: str, detail):
         self.orb.set_state(state, detail)
-        self.label.set_text(detail if state == STATE_TOOL else "")
-        # The caption appearing changes the window's visible shape.
+        # We no longer use the inline label for tools, since we have the ToolContainerWindow.
+        self.label.set_text("")
         self._apply_mask()
+        
+        if state == STATE_TOOL:
+            self.tool_container.show_tool(detail, self.frameGeometry())
+        else:
+            self.tool_container.hide()
 
     def _post(self, text: str, role: str, keep: bool = True):
         """Shows a message as a floating card and records it in the session.

@@ -13,18 +13,15 @@ from ultron import api_keys, tool_usage
 from ultron.database import Database
 from ultron.automation import (
     open_application, close_application, system_media_control,
-    search_spotify, adjust_volume, BrowserManager,
+    search_spotify, adjust_volume,
     get_system_health, type_notes, send_whatsapp_message,
-    chrome_search, chrome_open, chrome_read_page,
-    read_clipboard, copy_to_clipboard, find_files, read_file_content, system_power_control,
-    empty_recycle_bin, clean_temp_files, create_file, delete_file, list_directory, open_folder,
+    read_clipboard, copy_to_clipboard, read_file_content, system_power_control,
+    empty_recycle_bin, clean_temp_files, create_file, delete_file,
     copy_file, move_file, release_stuck_keys
 )
-from ultron.plugins.explorer_plugin import (
-    get_selected_file_in_explorer, get_current_explorer_folder,
-    list_current_explorer_folder
-)
-from ultron.plugins.gmail_plugin import read_emails, send_email, draft_email
+from ultron.chrome_browser import ChromeBrowser
+from ultron.plugins.browser_agent_plugin import run_browser_agent
+from ultron.plugins.search_plugin import search_and_open
 from ultron.plugins.docker_plugin import (
     docker_list_containers, docker_list_images, docker_start_container,
     docker_stop_container, docker_remove_container, docker_run_image, docker_start_daemon
@@ -35,15 +32,9 @@ from ultron.plugins.research_plugin import (
 from ultron.plugins.workflow_plugin import (
     create_workflow, run_workflow, list_workflows, delete_workflow
 )
-from ultron.plugins.screen_plugin import (
-    screen_read, screen_read_detailed, screen_capture, screen_read_ocr,
-    screen_find, screen_get_resolution,
-    screen_get_active_window, screen_get_mouse_position
-)
 from ultron.plugins.document_plugin import read_document
-from ultron.plugins.agent_monitor_plugin import (
-    agent_monitor_start, agent_monitor_stop, agent_monitor_status,
-    agent_monitor_configure, install_agent_hooks
+from ultron.plugins.watcher_plugin import (
+    start_watcher, stop_watcher, watch_screen_and_act
 )
 
 _WEEKDAYS = {
@@ -113,9 +104,17 @@ DESTRUCTIVE_TOOLS = {
 SCREEN_TOOLS = {
     "send_whatsapp_message",
     "type_notes",
-    "chrome_search",
-    "chrome_open",
+    "chrome_navigate",
+    "chrome_click",
+    "chrome_type",
+    "chrome_scroll",
     "chrome_read_page",
+    "chrome_screenshot",
+    "chrome_go_back",
+    "chrome_go_forward",
+    "chrome_new_tab",
+    "chrome_close_tab",
+    "chrome_press_key",
 }
 
 
@@ -145,10 +144,6 @@ TOOL_TIMEOUT_SECONDS = {
     "open_folder": 60,
     "clean_temp_files": 300,
     "empty_recycle_bin": 120,
-    # Network round trips to Google.
-    "read_emails": 90,
-    "send_email": 90,
-    "draft_email": 90,
     # Runs many other tools back to back, each with its own settling delay.
     "run_workflow": 900,
     # Image capture plus OCR.
@@ -162,7 +157,7 @@ TOOL_TIMEOUT_SECONDS = {
 # the thread that created it, so moving a browser call onto a watchdog thread
 # breaks it outright. These carry their own timeouts instead — see
 # BROWSER_ACTION_TIMEOUT_MS in automation.py.
-UNWATCHED_TOOL_PREFIXES = ("browser_",)
+UNWATCHED_TOOL_PREFIXES = ("chrome_", "start_browser_agent")
 
 
 def tool_timeout(tool_name: str):
@@ -316,17 +311,9 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "open_application", "close_application", "system_media_control",
         "adjust_volume", "search_spotify",
     ],
-    # Full browser automation
+    # Full browser automation (CDP-based, drives user's real Chrome)
     "browser": [
-        # Drive the user's own Chrome by keyboard. Preferred over the
-        # browser_* tools below, which launch a second Chromium against a
-        # separate profile with none of their logins.
-        "chrome_search", "chrome_open", "chrome_read_page",
-        "browser_navigate", "browser_read_page", "browser_click",
-        "browser_type_text", "browser_press_key", "browser_go_back",
-        "browser_go_forward", "browser_new_tab", "browser_switch_tab",
-        "browser_close_tab", "browser_take_screenshot", "browser_scroll",
-        "browser_close",
+        "start_browser_agent",
     ],
     # Screen reading / OCR / window awareness
     "screen": [
@@ -337,18 +324,15 @@ TOOL_GROUPS: dict[str, list[str]] = {
     # File system, clipboard, documents, notepad
     "files": [
         "read_clipboard", "copy_to_clipboard", "type_notes",
-        "find_files", "read_file_content", "create_file", "delete_file",
-        "copy_file", "move_file", "list_directory", "open_folder",
-        "read_document", "get_selected_file_in_explorer",
-        "get_current_explorer_folder", "list_current_explorer_folder",
+        "read_file_content", "create_file", "delete_file",
+        "copy_file", "move_file", "search_and_open",
+        "read_document",
     ],
     # System health, power, disk cleanup
     "system_health": [
         "get_system_health", "empty_recycle_bin", 
         "system_power_control", "screen_capture",
     ],
-    # Gmail
-    "email": ["read_emails", "send_email", "draft_email"],
     # Docker
     "docker": [
         "docker_list_containers", "docker_list_images",
@@ -363,11 +347,6 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "web_search": ["web_search"],
     # Saved workflow engine
     "workflow": ["create_workflow", "run_workflow", "list_workflows", "delete_workflow"],
-    # Agent / Claude Code monitor
-    "agent_monitor": [
-        "agent_monitor_start", "agent_monitor_stop", "agent_monitor_status",
-        "agent_monitor_configure", "install_agent_hooks",
-    ],
     # WhatsApp messaging
     "whatsapp": ["send_whatsapp_message"],
 }
@@ -401,7 +380,6 @@ _GROUP_TRIGGERS: dict[str, list[str]] = {
         "temperature", "clean", "recycle bin", "temp files", "shutdown",
         "restart", "sleep", "lock", "screenshot",
     ],
-    "email": ["email", "gmail", "mail", "inbox", "send email", "draft"],
     "docker": ["docker", "container", "image", "daemon", "compose"],
     "research": [
         "research", "investigate", "look into", "report", "background research",
@@ -411,10 +389,6 @@ _GROUP_TRIGGERS: dict[str, list[str]] = {
         "current", "latest", "fact", "find out", "look up", "tell me about",
     ],
     "workflow": ["workflow", "run workflow", "create workflow", "list workflow"],
-    "agent_monitor": [
-        "agent", "claude", "coding agent", "watching", "monitor agent",
-        "is claude done", "agent done",
-    ],
     "whatsapp": ["whatsapp", "send message", "message to", "chat"],
 }
 
@@ -427,11 +401,11 @@ _ARG_ALIASES = {
     "start_delay_seconds": ["delay_seconds", "seconds", "delay", "in_seconds"],
     "until_date_iso": ["until", "until_date", "end_date", "end"],
     # Browser navigation — local models often use 'url', 'link', 'query', 'address'
-    # instead of the exact parameter name 'query_or_url'
-    "query_or_url": ["url", "link", "href", "query", "address", "site", "destination", "page", "target"],
+    # instead of the exact parameter name 'url_or_query'
+    "url_or_query": ["url", "link", "href", "query", "address", "site", "destination", "page", "target", "query_or_url"],
     # Browser interaction — local models often use 'selector', 'text', 'element'
-    # instead of 'text_or_selector'
-    "text_or_selector": ["selector", "element", "target", "locator"],
+    # instead of 'target'
+    "target": ["selector", "element", "locator", "text_or_selector"],
 }
 
 
@@ -443,11 +417,16 @@ def coerce_tool_args(func, raw_args: dict) -> dict:
     (which would otherwise raise TypeError). Raises ValueError when a required
     parameter is still missing.
     """
-    if not isinstance(raw_args, dict):
-        raw_args = {}
-
     sig = inspect.signature(func)
     params = sig.parameters
+
+    if not isinstance(raw_args, dict):
+        # Weak models sometimes pass the raw argument directly instead of wrapped in a dictionary.
+        # If the function takes exactly one argument, we can infer it.
+        if raw_args is not None and len(params) == 1:
+            raw_args = {list(params.keys())[0]: raw_args}
+        else:
+            raw_args = {}
     accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
     if accepts_kwargs:
         return dict(raw_args)
@@ -702,7 +681,7 @@ class Brain:
         self._memory_listing = []
 
         self.db = Database()
-        self.browser = BrowserManager()
+        self.browser = ChromeBrowser()
 
         # Build the LLM client from settings, and rebuild it whenever the
         # provider, model, or API keys change on disk or via the UI.
@@ -1137,58 +1116,108 @@ class Brain:
                 return "No matching previous conversations found."
             return str(results)
             
-        def browser_navigate(query_or_url: str) -> str:
-            """Navigates the browser to a URL or a Google search."""
-            return self.browser.navigate(query_or_url)
-            
-        def browser_read_page() -> str:
-            """Reads and extracts the main text from the current page."""
+        def chrome_navigate(url_or_query: str) -> str:
+            """Navigates Chrome to a URL or performs a Google search. The user will see Chrome navigate live on screen.
+            Args:
+                url_or_query: A URL to visit (e.g. 'amazon.in') or a search query (e.g. 'best laptops 2025').
+            """
+            return self.browser.navigate(url_or_query)
+
+        def chrome_click(target: str) -> str:
+            """Clicks an element in Chrome by its visible text, button label, link text, or CSS selector.
+            Args:
+                target: The visible text of the element to click (e.g. 'Add to Cart', 'Sign In', 'Next').
+            """
+            return self.browser.click(target)
+
+        def chrome_type(target: str, text: str) -> str:
+            """Types text into an input field in Chrome, found by its placeholder text, label, or CSS selector.
+            Args:
+                target: The placeholder or label of the input field (e.g. 'Search', 'Email', 'Password').
+                text: The text to type into the field.
+            """
+            return self.browser.type_text(target, text)
+
+        def chrome_scroll(direction: str) -> str:
+            """Scrolls the Chrome page up or down.
+            Args:
+                direction: 'up' or 'down'.
+            """
+            return self.browser.scroll(direction)
+
+        def chrome_read_page() -> str:
+            """Reads and returns the text content of the current Chrome page."""
             return self.browser.read_page()
-            
-        def browser_click(text_or_selector: str) -> str:
-            """Clicks an element on the page based on its text content or CSS selector."""
-            return self.browser.click(text_or_selector)
-            
-        def browser_type_text(text_or_selector: str, input_text: str) -> str:
-            """Finds an input field (by placeholder or text) and types text into it."""
-            return self.browser.type_text(text_or_selector, input_text)
-            
-        def browser_press_key(key: str) -> str:
-            """Presses a keyboard key on the active page (e.g., 'Enter', 'Escape')."""
+
+        def chrome_screenshot(filename: str = None) -> str:
+            """Takes a screenshot of the current Chrome page.
+            Args:
+                filename: Optional filename (e.g. 'page.png'). Auto-generated if not provided.
+            """
+            return self.browser.screenshot(filename)
+
+        def chrome_go_back() -> str:
+            """Goes back to the previous page in Chrome."""
+            return self.browser.go_back()
+
+        def chrome_go_forward() -> str:
+            """Goes forward to the next page in Chrome."""
+            return self.browser.go_forward()
+
+        def chrome_new_tab(url: str = None) -> str:
+            """Opens a new tab in Chrome. If a URL is given, navigates to it.
+            Args:
+                url: Optional URL to open in the new tab.
+            """
+            return self.browser.new_tab(url)
+
+        def chrome_close_tab() -> str:
+            """Closes the current tab in Chrome."""
+            return self.browser.close_tab()
+
+        def chrome_press_key(key: str) -> str:
+            """Presses a keyboard key in Chrome (e.g. 'Enter', 'Escape', 'Tab').
+            Args:
+                key: The key to press.
+            """
             return self.browser.press_key(key)
             
-        def browser_go_back() -> str:
-            """Navigates back to the previous page in the browser."""
-            return self.browser.go_back()
+        def start_browser_agent(goal: str) -> str:
+            """Starts a dedicated browser agent to autonomously complete a complex browser task.
+            Use this when the user asks to research on the web, search Amazon, find products, or navigate complex sites.
+            Args:
+                goal: The full goal for the browser agent to achieve.
+            """
+            om = getattr(self, "output_manager", None)
+            is_local = (self.active_api == "localapi")
             
-        def browser_scroll(direction: str) -> str:
-            """Scrolls the page 'up' or 'down'."""
-            return self.browser.scroll(direction)
+            # The agent needs access to the raw chrome functions.
+            # We construct a dictionary of just the browser functions.
+            browser_funcs = {
+                "chrome_navigate": chrome_navigate,
+                "chrome_click": chrome_click,
+                "chrome_type": chrome_type,
+                "chrome_scroll": chrome_scroll,
+                "chrome_read_page": chrome_read_page,
+                "chrome_screenshot": chrome_screenshot,
+                "chrome_go_back": chrome_go_back,
+                "chrome_go_forward": chrome_go_forward,
+                "chrome_new_tab": chrome_new_tab,
+                "chrome_close_tab": chrome_close_tab,
+                "chrome_press_key": chrome_press_key,
+            }
             
-        def browser_close() -> str:
-            """Closes the browser session."""
-            return self.browser.close()
+            browser_schema = [ToolBridge.function_to_schema(f) for f in browser_funcs.values()]
             
-        def browser_go_forward() -> str:
-            """Navigates forward to the next page in history."""
-            return self.browser.go_forward()
-            
-        def browser_new_tab(url: str = None) -> str:
-            """Opens a new browser tab. If url is provided, navigates to it."""
-            return self.browser.new_tab(url)
-            
-        def browser_switch_tab(index: int) -> str:
-            """Switches to the tab at the given index (0-based)."""
-            return self.browser.switch_tab(index)
-            
-        def browser_close_tab(index: int = None) -> str:
-            """Closes the tab at the given index, or the active tab if index is None."""
-            return self.browser.close_tab(index)
-            
-        def browser_take_screenshot(filename: str = None) -> str:
-            """Takes a full page screenshot in the browser and saves it."""
-            return self.browser.take_screenshot(filename)
-            
+            return run_browser_agent(
+                goal=goal,
+                complete=self.complete,
+                tool_functions=browser_funcs,
+                tools_schema=browser_schema,
+                output_manager=om,
+                is_local_model=is_local
+            )
+
         def start_background_research(topic: str) -> str:
             """Starts an asynchronous background research task on a topic.
             Use this when the user asks to research, investigate, or look into a technology or topic.
@@ -1252,53 +1281,25 @@ class Brain:
             "get_system_health": get_system_health,
             "system_power_control": system_power_control,
             "empty_recycle_bin": empty_recycle_bin,
-            # ── Screen ────────────────────────────────────────────────────
-            "screen_read": screen_read,
-            "screen_read_detailed": screen_read_detailed,
-            "screen_capture": screen_capture,   # replaces take_screenshot
-            "screen_read_ocr": screen_read_ocr,
-            "screen_find": screen_find,
-            "screen_get_resolution": screen_get_resolution,
-            "screen_get_active_window": screen_get_active_window,
-            "screen_get_mouse_position": screen_get_mouse_position,
-            # ── Browser ───────────────────────────────────────────────────
-            "browser_navigate": browser_navigate,
-            "browser_read_page": browser_read_page,
-            "browser_click": browser_click,
-            "browser_type_text": browser_type_text,
-            "browser_press_key": browser_press_key,
-            "browser_go_back": browser_go_back,
-            "browser_go_forward": browser_go_forward,
-            "browser_new_tab": browser_new_tab,
-            "browser_switch_tab": browser_switch_tab,
-            "browser_close_tab": browser_close_tab,
-            "browser_take_screenshot": browser_take_screenshot,
-            "browser_scroll": browser_scroll,
-            "browser_close": browser_close,
+            # ── Screen Watcher ─────────────────────────────────────────────
+            "start_watcher": start_watcher,
+            "stop_watcher": stop_watcher,
+            "watch_screen_and_act": watch_screen_and_act,
+            # ── Browser (Dedicated Agent) ─────────────────────────────────
+            "start_browser_agent": start_browser_agent,
             # ── Files & Clipboard ─────────────────────────────────────────
             "type_notes": type_notes,
             "read_clipboard": read_clipboard,
             "copy_to_clipboard": copy_to_clipboard,
-            "find_files": find_files,
             "read_file_content": read_file_content,
             "create_file": create_file,
             "delete_file": delete_file,
             "copy_file": copy_file,
             "move_file": move_file,
-            "list_directory": list_directory,
-            "open_folder": open_folder,
-            "get_selected_file_in_explorer": get_selected_file_in_explorer,
-            "get_current_explorer_folder": get_current_explorer_folder,
-            "list_current_explorer_folder": list_current_explorer_folder,
+            "search_and_open": search_and_open,
             "read_document": read_document,
             # ── Communication ─────────────────────────────────────────────
             "send_whatsapp_message": send_whatsapp_message,
-            "chrome_search": chrome_search,
-            "chrome_open": chrome_open,
-            "chrome_read_page": chrome_read_page,
-            "read_emails": read_emails,
-            "send_email": send_email,
-            "draft_email": draft_email,
             # ── Docker ────────────────────────────────────────────────────
             "docker_list_containers": docker_list_containers,
             "docker_list_images": docker_list_images,
@@ -1319,12 +1320,6 @@ class Brain:
             "run_workflow": run_workflow_tool,
             "list_workflows": list_workflows,
             "delete_workflow": delete_workflow,
-            # ── Agent Monitor ─────────────────────────────────────────────
-            "agent_monitor_start": agent_monitor_start,
-            "agent_monitor_stop": agent_monitor_stop,
-            "agent_monitor_status": agent_monitor_status,
-            "agent_monitor_configure": agent_monitor_configure,
-            "install_agent_hooks": install_agent_hooks,
         }
         
         # Generate the JSON schema for OpenRouter tools
@@ -1387,19 +1382,27 @@ You are currently operating in TRUTH MODE. You must strictly adhere to the follo
   - To show reminders use `list_reminders`; to remove one use `list_reminders` first, then `delete_reminder` with its id.
   - To push a reminder back ("snooze it", "remind me again in 20 minutes") use `snooze_reminder`. NEVER say a reminder has been moved, snoozed or rescheduled unless this tool actually ran and reported success.
 
-# BROWSER AUTOMATION
-You have full interactive control over a web browser.
-- Navigating: Use `browser_navigate` to search Google or go to a URL.
-- Tabs: Use `browser_new_tab`, `browser_switch_tab`, and `browser_close_tab` for multi-tasking.
-- Interacting: Use `browser_click`, `browser_type_text`, `browser_press_key`, `browser_scroll`, `browser_go_back`, and `browser_go_forward` to drive the page.
-- Extracting: Use `browser_read_page` to extract text from the current page, and `browser_take_screenshot` to capture it visually.
-- Closing: Use `browser_close` to close the whole browser when instructed.
+# CHROME BROWSER AUTOMATION
+For any complex web browsing tasks (like searching Amazon, navigating websites, filling forms, reading pages), you MUST use the `start_browser_agent` tool.
+- Pass the full user goal into `goal`.
+- The browser agent will autonomously plan and execute the task step-by-step using a dedicated Chrome instance, showing everything live to the user.
+- Wait for it to finish; it will return a final summary of its findings or actions.
+- IMPORTANT: When the user says "use the browser", "open in browser", "search in Chrome", or "find me X on [website]", delegate the task using `start_browser_agent`. Do NOT use `web_search` for these requests.
 
 # SYSTEM AUTOMATION & TOOLS
 - Use `open_application` to launch local desktop apps.
 - Use `close_application` to close local desktop apps.
 - TO CONTROL MUSIC: You MUST use `system_media_control` with action 'play', 'pause', 'next', or 'prev'.
 - TO ADJUST VOLUME: Use `adjust_volume` with action 'volume_up', 'volume_down', or 'mute'.
+
+# SCREEN WATCHER AGENT
+You have a dedicated Screen Watcher Agent that can see the user's screen, find UI elements, and take physical actions (mouse clicks, typing) based on visual layout.
+- START/STOP: If the user asks you to start watching their screen or turn on the watcher, use `start_watcher`. If they ask to stop, use `stop_watcher`.
+- ACT: If the user asks you to interact with the screen, find a visual element, or answer a question about what is visible on the screen, use `watch_screen_and_act`. Pass the user's full visual goal into the tool. Do NOT try to guess coordinates yourself; the watcher agent will handle the visual analysis and physical execution.
+
+# GESTURE CONTROL (CAMERA)
+- If the user asks to "activate virtual mouse", "turn on gesture control", "use camera for mouse", or similar, use `toggle_gesture_control` with activate=true.
+- If they ask to stop or turn off the camera/gesture control, use `toggle_gesture_control` with activate=false.
 
 # MUSIC & SPOTIFY (CRITICAL — READ CAREFULLY)
 You have full autonomous music discovery capability. NEVER ask the user for a song name if they give you a genre, mood, language, or vague request.
@@ -1418,13 +1421,6 @@ Examples of autonomous behaviour:
 
 WHAT `search_spotify` ACTUALLY DOES: it opens Spotify showing the search results. It does NOT start playback. Never tell the user music is playing, has started, or will begin shortly. Say you have brought up the results and they can pick one. Claiming a song is playing when the screen shows a list of results is worse than saying nothing.
 
-# SCREEN AWARENESS
-- PRIMARY: If the user asks "what is on my screen", "what do you see", or asks about a visible element, use `screen_read`. This is fast and returns a text summary of all visible UI controls and text. It works with any model (no vision needed). You can pass a `window_title` to read a specific window even if it is not focused.
-- DETAILED: Use `screen_read_detailed` when you need precise layout info (bounding boxes, control types, enabled states) — e.g., for automation or describing exact UI positions.
-- SCREENSHOT: Use `screen_capture` only when the user explicitly asks for a screenshot, or when you need to visually analyze something (images, colors, layout). This saves a screenshot and returns base64 image data.
-- OCR FALLBACK: Use `screen_read_ocr` for canvas, game, or custom-drawn UI content that `screen_read` cannot detect. You can specify a screen region (left, top, right, bottom) or read the full screen.
-- If you need to find where something is on screen, use `screen_find`.
-- To get window or cursor context, use `screen_get_active_window` and `screen_get_mouse_position`.
 - SYSTEM HEALTH: Use `get_system_health` to check CPU, RAM, Battery %, and Disk storage space.
 - TAKE NOTES: Use `type_notes` whenever the user asks to "take notes", "write this down", or type text onto the screen. It will automatically type into VSCode if it's active, or open Notepad by default.
 - WHATSAPP MESSAGING: Use `send_whatsapp_message` to send messages to contacts via WhatsApp Desktop.
@@ -1438,7 +1434,6 @@ WHAT `search_spotify` ACTUALLY DOES: it opens Spotify showing the search results
 - DESTRUCTIVE ACTIONS: Ultron itself asks the user to approve anything destructive (`delete_file`, `empty_recycle_bin`, shutting down, deleting reminders or workflows) — you do not need a confirmation argument, and you cannot approve on the user's behalf. Call the tool when the user asks for it; a prompt appears and the tool runs only if they agree. If the result says the user did not approve, tell them plainly that nothing was changed and do not try again.
 - `delete_file` moves the file to the Recycle Bin, so it can be restored. Say so when you report it. `empty_recycle_bin` is permanent.
 - POWER CONTROL: Use `system_power_control` to lock PC, sleep PC, schedule system shutdown, or cancel a scheduled shutdown.
-- GMAIL: Use `read_emails` to read recent unread emails, `send_email` to send an email, and `draft_email` to create a draft.
 - DOCKER: Use `docker_start_daemon` to turn on the engine. Use `docker_list_containers`, `docker_list_images`, `docker_start_container`, `docker_stop_container`, `docker_remove_container`, and `docker_run_image` to manage local containers and images.
 - QUICK WEB SEARCH: For quick facts, current events, or real-time data, use `web_search` to query the internet and answer the user directly. If the search fails (e.g., no internet), fall back to answering from your training data. If the tool returns 'Web search blocked by CAPTCHA.', you MUST tell the user that the search was blocked by a CAPTCHA, and then provide your best answer from your training data. If you need more details from a specific page, use `research_read_url`.
 
@@ -1456,14 +1451,7 @@ When the user asks you to research a topic, investigate something, or look into 
   For multi-arg tools, separate arguments with a pipe '|' character (e.g., "browser_type_text Search|React Server Components").
 - RUN: When the user asks to "start", "run", or "execute" a workflow by name, use `run_workflow`.
 - LIST: When the user asks to see or show their workflows, use `list_workflows`.
-- DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`.
-
-# AGENT MONITOR
-You can watch the user's coding agents (Claude Code in VSCode, Antigravity, etc.) and alert them when an agent stops, finishes, or asks a question.
-- START/STOP: Use `agent_monitor_start` and `agent_monitor_stop` when the user asks to watch or stop watching their agents.
-- STATUS: If the user asks "is Claude done?", "what are my agents doing?", or "is anything waiting on me?", use `agent_monitor_status`.
-- ALERT STYLE: If the user wants alerts quieter or louder, use `agent_monitor_configure` with 'toast', 'voice', or 'both'.
-- SETUP: `install_agent_hooks` installs the global Claude Code hooks so every session on the machine reports in. This only needs to run once — tell the user to restart their Claude Code sessions afterwards."""
+- DELETE: When the user asks to remove or delete a workflow, use `delete_workflow`."""
 
     def _get_persona_instructions(self) -> str:
         """Who Ultron is, as opposed to what it can do.
@@ -2193,16 +2181,19 @@ Your response: Let me find some great Malayalam songs for you, sir.
         except TimeoutError as e:
             self._emit_tool_event("end", func_name, False)
             tool_usage.record(func_name, False)
+            if self.db: self.db.record_tool_usage(func_name, False)
             return f"Error: {e}"
         except Exception as e:
             self._emit_tool_event("end", func_name, False)
             tool_usage.record(func_name, False)
+            if self.db: self.db.record_tool_usage(func_name, False)
             return f"Error executing {func_name}: {e}"
 
         # A tool can report failure in its return string without raising.
         ok = not (isinstance(result, str) and result.startswith("Error"))
         self._emit_tool_event("end", func_name, ok)
         tool_usage.record(func_name, ok)
+        if self.db: self.db.record_tool_usage(func_name, ok)
         return result
 
     def _record_usage(self, response):
@@ -2312,10 +2303,6 @@ Your response: Let me find some great Malayalam songs for you, sir.
                 now_str, self.truth_mode, tools_text=tools_text
             )
 
-            if config.get("live_screen", False):
-                from ultron.plugins.screen_plugin import screen_read
-                targeted_sys_prompt += f"\n\n# CURRENT SCREEN CONTEXT\n{screen_read()}"
-
             # Replace only the system message; preserve the rest of the history
             messages_for_call = [
                 {"role": "system", "content": targeted_sys_prompt},
@@ -2397,17 +2384,8 @@ Your response: Let me find some great Malayalam songs for you, sir.
             import time as _time
             self.db.save_message(session_id=self.session_id, role='user', message=user_text)
             
-            screen_context_text = ""
-            if config.get("live_screen", False):
-                from ultron.plugins.screen_plugin import screen_read
-                screen_context_text = f"\n\n# CURRENT SCREEN CONTEXT\n{screen_read()}"
-
             def get_call_messages():
                 msgs = list(self.messages)
-                if screen_context_text and msgs and msgs[0].get("role") == "system":
-                    sys_msg = dict(msgs[0])
-                    sys_msg["content"] = str(sys_msg.get("content", "")) + screen_context_text
-                    msgs[0] = sys_msg
                 return msgs
             
             # Append user message

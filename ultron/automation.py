@@ -1140,37 +1140,6 @@ def copy_to_clipboard(text: str) -> str:
     except Exception as e:
         return f"Failed to copy to clipboard: {e}"
 
-def find_files(search_query: str, location: str = 'Desktop') -> str:
-    """Finds files matching search_query in Desktop, Downloads, or Documents folder.
-    Args:
-        search_query: File name or extension (e.g. '.pdf', 'notes', '.txt').
-        location: 'Desktop', 'Downloads', or 'Documents'.
-    """
-    try:
-        # Resolved through the registry so a OneDrive-redirected Desktop or
-        # Documents is searched, not an empty leftover folder.
-        target_dir = known_folder(location) or known_folder("desktop")
-        if not target_dir:
-            return f"Could not locate the {location} folder on this computer."
-
-        matches = []
-        for root, _, files in os.walk(target_dir):
-            for file in files:
-                if search_query.lower() in file.lower():
-                    matches.append(os.path.join(root, file))
-                if len(matches) >= 15:
-                    break
-            if len(matches) >= 15:
-                break
-                
-        if not matches:
-            return f"No files matching '{search_query}' were found in {location}."
-            
-        result_str = "\n".join(f"- {m}" for m in matches)
-        return f"Found matching files in {location}:\n{result_str}"
-    except Exception as e:
-        return f"Failed to search for files: {e}"
-
 def read_file_content(file_path: str) -> str:
     """Reads content of a local text file (.txt, .md, .py, .json, .csv).
     Args:
@@ -1337,93 +1306,6 @@ def delete_file(file_path: str) -> str:
                 "It can be restored from there if that was a mistake.")
     except Exception as e:
         return f"Failed to delete file: {e}"
-
-def list_directory(path: str = ".") -> str:
-    """Lists files and subdirectories in a folder.
-    Args:
-        path: Path to folder (defaults to current working directory).
-    """
-    try:
-        user_home = os.path.expanduser("~")
-        if path.lower() in ['desktop', 'desktop/']:
-            target_path = os.path.join(user_home, 'Desktop')
-        elif path.lower() in ['downloads', 'downloads/']:
-            target_path = os.path.join(user_home, 'Downloads')
-        elif path.lower() in ['documents', 'documents/']:
-            target_path = os.path.join(user_home, 'Documents')
-        else:
-            target_path = path
-            
-        if not os.path.exists(target_path):
-            return f"Folder path does not exist: '{target_path}'"
-            
-        entries = os.listdir(target_path)
-        if not entries:
-            return f"Directory '{target_path}' is empty."
-            
-        items = []
-        for entry in entries[:30]:
-            full_p = os.path.join(target_path, entry)
-            is_dir = "[DIR]" if os.path.isdir(full_p) else "[FILE]"
-            items.append(f"{is_dir} {entry}")
-            
-        return f"Directory contents of '{target_path}':\n" + "\n".join(items)
-    except Exception as e:
-        return f"Failed to list directory: {e}"
-
-def open_folder(path: str) -> str:
-    """Opens a folder in Windows File Explorer.
-
-    Accepts a full path ('C:/projects/ultron'), a shell folder name
-    ('Downloads', 'Desktop', 'Documents', 'Pictures', 'Music', 'Videos'), or
-    just the folder's name ('ultron') — an unknown name is searched for on the
-    user's drives, so you do NOT need to ask the user for a full path first.
-
-    Args:
-        path: Folder path, shell folder name, or plain folder name.
-    """
-    try:
-        query = (path or "").strip().strip("\"'")
-        if not query:
-            return "No folder was given."
-
-        missed_path = ""
-        if _looks_like_path(query):
-            expanded = os.path.expanduser(os.path.expandvars(query))
-            if os.path.isdir(expanded):
-                resolved = os.path.abspath(expanded)
-                os.startfile(resolved)
-                return f"Successfully opened folder: '{resolved}'"
-            # Fall through and search on the final component, but remember
-            # that what opens is not what was asked for.
-            missed_path = query
-            query = os.path.basename(os.path.normpath(expanded)) or query
-
-        name = _clean_folder_name(query)
-
-        shell_folder = known_folder(name)
-        if shell_folder:
-            os.startfile(shell_folder)
-            return f"Successfully opened folder: '{shell_folder}'"
-
-        # Treat it as a name and go looking, rather than bouncing the question
-        # back to the user.
-        matches = find_folders(name)
-        if not matches:
-            return (f"No folder named '{name}' was found on this computer. "
-                    f"Ask the user for the full path.")
-
-        if len(matches) == 1:
-            os.startfile(matches[0])
-            if missed_path:
-                return (f"'{missed_path}' does not exist. Opened the closest "
-                        f"match instead: '{matches[0]}'. Tell the user this.")
-            return f"Successfully opened folder: '{matches[0]}'"
-
-        listed = "\n".join(f"- {m}" for m in matches)
-        return (f"Several folders match '{name}'. Ask the user which one:\n{listed}")
-    except Exception as e:
-        return f"Failed to open folder: {e}"
 
 def copy_file(source_path: str, destination_path: str) -> str:
     """Copies a file or directory from source_path to destination_path."""

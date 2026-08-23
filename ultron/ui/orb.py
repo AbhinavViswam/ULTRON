@@ -38,8 +38,8 @@ LEVEL_RELEASE = 0.12  # falling: slow, so it settles rather than snapping
 STATE_COLORS = {
     STATE_IDLE: QColor(theme.ACCENT_DIM),
     STATE_LISTENING: QColor(theme.ACCENT),
-    STATE_THINKING: QColor("#a78bfa"),
-    STATE_TOOL: QColor(theme.WARNING),
+    STATE_THINKING: QColor("#fbbf24"),
+    STATE_TOOL: QColor("#ea580c"),
     STATE_SPEAKING: QColor(theme.ACCENT),
 }
 
@@ -111,7 +111,7 @@ class Orb(QWidget):
     def _tick(self):
         rate = LEVEL_ATTACK if self._level > self._smoothed else LEVEL_RELEASE
         self._smoothed += (self._level - self._smoothed) * rate
-        self._phase = (self._phase + 0.06) % (math.pi * 2)
+        self._phase = (self._phase + 0.03) % (math.pi * 2)
 
         # Loud speech while listening throws off a ring, so the orb visibly
         # reacts to *your* voice rather than just glowing.

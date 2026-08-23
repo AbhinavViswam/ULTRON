@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #f97316; /* Orange 500 */
+  --color-secondary: #fb923c; /* Orange 400 */
+  --color-bg-dark: #0f0502; /* Very deep warm black */
+  --color-panel: rgba(20, 10, 5, 0.7); /* Warm glass */
+}
+
+@layer base {
+  body {
+    @apply bg-bg-dark text-orange-50 antialiased m-0 p-0 font-sans h-screen w-screen overflow-hidden;
+    /* Premium dark orange gradient background */
+    background: radial-gradient(circle at top right, #3f1503, #0f0502 40%, #000000 100%);
+  }
+}
+
+/* Glassmorphism Utilities */
+@layer utilities {
+  .glass-panel {
+    @apply bg-panel backdrop-blur-md border border-slate-700/50 shadow-xl;
+  }
+  
+  .glass-button {
+    @apply bg-slate-800/80 hover:bg-slate-700/80 backdrop-blur-sm border border-slate-600 transition-all duration-200 active:scale-95;
+  }
+  
+  /* Micro-animations */
+  .fade-in-up {
+    animation: fadeInUp 0.3s ease-out forwards;
+  }
+  
+  .pulse-glow {
+    animation: pulseGlow 2s infinite alternate;
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseGlow {
+  from { box-shadow: 0 0 10px rgba(249, 115, 22, 0.2); }
+  to { box-shadow: 0 0 20px rgba(249, 115, 22, 0.6); }
+}
+
+@keyframes breathe {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: inset -15px -15px 40px rgba(0,0,0,0.9), inset 10px 10px 30px rgba(255,237,213,0.3), 0 0 30px rgba(234,88,12,0.4);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: inset -15px -15px 40px rgba(0,0,0,0.8), inset 10px 10px 30px rgba(255,237,213,0.5), 0 0 60px rgba(252,211,77,0.7);
+  }
+}
+
+/* Custom Scrollbar for sleekness */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-700/50 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-600;
+}

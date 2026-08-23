@@ -42,14 +42,5 @@
       "interval_seconds": 3600,
       "notify_popup": false
     }
-  },
-  "agent_monitor": {
-    "enabled": true,
-    "port": 8787,
-    "alert_mode": "both",
-    "min_run_seconds": 10,
-    "escalate_seconds": 120,
-    "alert_when_focused": true,
-    "pending_tool_seconds": 10
   }
 }

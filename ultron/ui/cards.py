@@ -680,3 +680,51 @@ class CardStack:
             card.hide()
             card.deleteLater()
         self._cards.clear()
+
+
+class ToolContainerWindow(_FloatingWindow):
+    """A persistent floating panel showing the active tool, positioned below the orb."""
+    
+    def __init__(self):
+        super().__init__(accept_focus=False)
+        self.setFixedWidth(240)
+        
+        self._fill = QColor(theme.PANEL_LIGHT)
+        self._stroke = QColor(theme.BORDER)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+        
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+        
+        icon = QLabel("•")
+        icon.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 14px; font-weight: bold;")
+        header_layout.addWidget(icon)
+        
+        header = QLabel("SYSTEM TOOLS")
+        header.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;"
+        )
+        header_layout.addWidget(header)
+        header_layout.addStretch()
+        
+        layout.addLayout(header_layout)
+        
+        self._tool_label = QLabel("")
+        self._tool_label.setWordWrap(True)
+        self._tool_label.setStyleSheet(f"color: {theme.ACCENT}; font-size: 11px; font-style: italic;")
+        layout.addWidget(self._tool_label)
+        
+        self.hide()
+        
+    def show_tool(self, tool_name: str, anchor_rect):
+        """Displays the tool name and positions the card beneath the given rectangle."""
+        self._tool_label.setText(f"{tool_name}...")
+        self.adjustSize()
+        x = anchor_rect.center().x() - (self.width() // 2)
+        y = anchor_rect.bottom() + 10
+        self.move(x, y)
+        self.show()

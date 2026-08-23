@@ -92,6 +92,15 @@ class Database:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tool_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name TEXT NOT NULL,
+                    success BOOLEAN NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             self._init_routines(cursor)
             conn.commit()
 
@@ -116,6 +125,76 @@ class Database:
                 metadatas=[{"role": role, "session_id": session_id, "timestamp": timestamp}],
                 ids=[doc_id]
             )
+
+    def record_tool_usage(self, tool_name: str, success: bool):
+        """Records a single tool invocation into the chronological history."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO tool_usage (tool_name, success)
+                VALUES (?, ?)
+            ''', (tool_name, 1 if success else 0))
+            conn.commit()
+
+    def get_tool_statistics(self):
+        """Returns aggregate usage statistics for all tools, sorted by total uses."""
+        import json, os
+        
+        # 1. Get from SQLite
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 
+                    tool_name, 
+                    COUNT(CASE WHEN success=1 THEN 1 END) as successes, 
+                    COUNT(CASE WHEN success=0 THEN 1 END) as failures,
+                    MAX(timestamp) as last_used
+                FROM tool_usage 
+                GROUP BY tool_name 
+            ''')
+            db_stats = {row[0]: {"successes": row[1], "failures": row[2], "last_used": row[3]} for row in cursor.fetchall()}
+
+        # 2. Merge with legacy tool_usage.json
+        json_path = os.path.join(os.path.dirname(self.db_path), "tool_usage.json")
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    legacy_data = json.load(f)
+                    
+                for tool_name, stats in legacy_data.items():
+                    calls = stats.get("calls", 0)
+                    if calls == 0:
+                        continue
+                    errors = stats.get("errors", 0)
+                    successes = calls - errors
+                    last_used = stats.get("last_used")
+                    
+                    if tool_name in db_stats:
+                        db_stats[tool_name]["successes"] += successes
+                        db_stats[tool_name]["failures"] += errors
+                        if last_used and (not db_stats[tool_name]["last_used"] or last_used > db_stats[tool_name]["last_used"]):
+                            db_stats[tool_name]["last_used"] = last_used
+                    else:
+                        db_stats[tool_name] = {
+                            "successes": successes,
+                            "failures": errors,
+                            "last_used": last_used
+                        }
+            except Exception:
+                pass
+                
+        # 3. Format and sort
+        results = []
+        for name, stats in db_stats.items():
+            results.append({
+                "tool_name": name,
+                "successes": stats["successes"],
+                "failures": stats["failures"],
+                "last_used": stats["last_used"]
+            })
+            
+        results.sort(key=lambda x: (x["successes"] + x["failures"]), reverse=True)
+        return results
 
     # --- todos ---------------------------------------------------------
 

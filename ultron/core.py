@@ -33,6 +33,7 @@ from ultron.listener import VoiceListener
 from ultron.self_hearing import SelfHearingGuard
 from ultron.cron_manager import CronManager
 from ultron.output_manager import OutputManager
+from ultron.plugins.gesture_plugin import GestureController
 
 FIRST_LOADING_MESSAGES = [
     "Hmm, let me see...",
@@ -106,11 +107,10 @@ TOOL_LABELS = {
 
 # Prefix rules for families of tools, checked when there is no exact match.
 TOOL_LABEL_PREFIXES = (
-    ("browser_", "browsing the web"),
+    ("chrome_", "browsing in Chrome"),
     ("docker_", "working with Docker"),
     ("set_reminder", "setting a reminder"),
     ("set_recurring_reminder", "setting a recurring reminder"),
-    ("agent_monitor", "checking your agents"),
     ("screen_", "looking at your screen"),
     ("workflow", "working with workflows"),
 )
@@ -217,10 +217,10 @@ class UltronCore:
         self.speaker = VoiceSpeaker(voice_name=voice_name)
         self.output_manager = OutputManager(self.speaker, echo_to_console=echo_to_console)
         self.brain.output_manager = self.output_manager
+        self.gesture_controller = GestureController(self)
 
         self.listener = None
         self.cron_manager = None
-        self.agent_monitor = None
 
         self._command_queue = queue.Queue()
         self._running = False
@@ -239,6 +239,7 @@ class UltronCore:
         self._state_listeners = []
         self._level_listeners = []
         self._confirm_listeners = []
+        self._tool_listeners = []
 
         # Inputs to the derived state, each owned by a different component.
         self._speaking = False
@@ -259,6 +260,26 @@ class UltronCore:
         # Destructive tools ask a human before running. Refused by default if
         # no front end registers itself as able to ask.
         self.brain.set_confirm_handler(self._confirm)
+        
+        # Inject gesture tool into brain
+        def toggle_gesture_control(activate: bool) -> str:
+            """Turns the camera gesture control (virtual mouse and presence detection) on or off."""
+            if activate:
+                self.gesture_controller.start()
+                return "Gesture control activated. Virtual mouse and presence detection are now running."
+            else:
+                self.gesture_controller.stop()
+                return "Gesture control deactivated. Camera is turned off."
+                
+        self.brain.tool_functions["toggle_gesture_control"] = toggle_gesture_control
+        import ultron.brain
+        if "core" in getattr(ultron.brain, "TOOL_GROUPS", {}):
+            ultron.brain.TOOL_GROUPS["core"].append("toggle_gesture_control")
+            
+        if hasattr(self.brain, "tools_schema"):
+            from ultron.brain import ToolBridge
+            self.brain.tools_schema.append(ToolBridge.function_to_schema(toggle_gesture_control))
+            
         # "Run it now" has to go through the same queue as everything else, so
         # one turn never starts on top of another.
         self.brain.routine_runner = (
@@ -299,6 +320,11 @@ class UltronCore:
         label while in STATE_TOOL, and is None otherwise.
         """
         self._state_listeners.append(callback)
+        return callback
+
+    def on_tool_event(self, callback):
+        """callback(phase, name, detail) when a tool starts or stops."""
+        self._tool_listeners.append(callback)
         return callback
 
     def on_level(self, callback):
@@ -443,6 +469,7 @@ class UltronCore:
 
         self._active_tool = name if phase == "start" else None
         self._recompute_state()
+        self._fire(self._tool_listeners, phase, name)
 
     def _on_speaker_level(self, level: float):
         self._emit_level(level)
@@ -582,6 +609,7 @@ class UltronCore:
 
     def stop_microphone(self):
         if self.listener:
+            self.speaker.wait()
             self.listener.stop()
             self.listener = None
             self._emit_level(0.0)
@@ -890,11 +918,6 @@ class UltronCore:
         if config.get("microphone_active", True):
             self.start_microphone()
 
-        if config.get("agent_monitor.enabled", True):
-            from ultron.plugins.agent_monitor_plugin import get_monitor
-            self.agent_monitor = get_monitor(output_manager=self.output_manager)
-            self._status(f"[AgentMonitor] {self.agent_monitor.start()}")
-
         self.cron_manager = CronManager(brain=self.brain, output_manager=self.output_manager)
         self.cron_manager.start()
 
@@ -911,7 +934,6 @@ class UltronCore:
             lambda: self.cron_manager and self.cron_manager.stop(),
             lambda: self.brain.browser and self.brain.browser.close(),
             self.output_manager.stop,
-            lambda: self.agent_monitor and self.agent_monitor.is_running and self.agent_monitor.stop(),
         ):
             try:
                 stop()

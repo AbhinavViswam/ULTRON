@@ -126,6 +126,17 @@ class SettingsPanel(QWidget):
         self.local_url_row_label = QLabel("Local API URL")
         provider_form.addRow(self.local_url_row_label, self.local_url_edit)
 
+        # Vision specific settings
+        self.vision_provider_combo = QComboBox()
+        for label, value in PROVIDER_CHOICES:
+            self.vision_provider_combo.addItem(label, value)
+        # Default to same as main or specific vision option
+        provider_form.addRow("Vision Provider", self.vision_provider_combo)
+
+        self.vision_model_edit = QLineEdit()
+        self.vision_model_edit.setPlaceholderText("e.g. moondream or minicpm-v")
+        provider_form.addRow("Vision Model", self.vision_model_edit)
+
         form.addLayout(provider_form)
         form.addWidget(_separator())
 
@@ -143,6 +154,11 @@ class SettingsPanel(QWidget):
         self.google_key.setEchoMode(QLineEdit.Password)
         self.google_key.setPlaceholderText("AIza...")
         keys_form.addRow("Google", self.google_key)
+
+        self.vision_key = QLineEdit()
+        self.vision_key.setEchoMode(QLineEdit.Password)
+        self.vision_key.setPlaceholderText("Vision specific API key (optional)")
+        keys_form.addRow("Vision API Key", self.vision_key)
 
         # Groq has been selectable as a provider with no way to enter its key
         # here, so it could only be configured by hand-editing keys.json.
@@ -238,27 +254,7 @@ class SettingsPanel(QWidget):
         idle_hint.setObjectName("hint")
         idle_hint.setWordWrap(True)
         form.addWidget(idle_hint)
-        form.addWidget(_separator())
-
-        # --- Agent monitor ----------------------------------------------
-        form.addWidget(_section("Agent Monitor"))
-        self.monitor_check = QCheckBox("Watch coding agents and alert me")
-        form.addWidget(self.monitor_check)
-
-        monitor_form = QFormLayout()
-        monitor_form.setSpacing(7)
-        self.alert_combo = QComboBox()
-        self.alert_combo.addItems(ALERT_MODES)
-        monitor_form.addRow("Alert mode", self.alert_combo)
-
-        self.port_spin = QSpinBox()
-        self.port_spin.setRange(1024, 65535)
-        monitor_form.addRow("Listener port", self.port_spin)
-        form.addLayout(monitor_form)
-
-        monitor_hint = QLabel("Port changes take effect on restart.")
-        monitor_hint.setObjectName("hint")
-        form.addWidget(monitor_hint)
+        form.addWidget(idle_hint)
         form.addWidget(_separator())
 
         # --- Gmail --------------------------------------------------------
@@ -310,11 +306,21 @@ class SettingsPanel(QWidget):
 
         self.model_edit.setText(config.model_for(provider))
         self.local_url_edit.setText(config.get("local_api_url", "http://localhost:11434/v1"))
+        
+        vision_provider = config.get("vision_provider", provider)
+        v_index = self.vision_provider_combo.findData(vision_provider)
+        self.vision_provider_combo.blockSignals(True)
+        self.vision_provider_combo.setCurrentIndex(max(v_index, 0))
+        self.vision_provider_combo.blockSignals(False)
+        
+        self.vision_model_edit.setText(config.get("vision_model", ""))
+        
         self._apply_provider_visibility(provider)
 
         self.openrouter_key.setText(config.get_key("openrouter"))
         self.google_key.setText(config.get_key("google"))
         self.groq_key.setText(config.get_key("groq"))
+        self.vision_key.setText(config.get_key("vision"))
         self._show_spare_keys()
 
         self.mic_check.setChecked(bool(config.get("microphone_active", True)))
@@ -340,11 +346,6 @@ class SettingsPanel(QWidget):
             bool(config.get("idle_chat.silent_when_mic_off", False)))
         self.idle_fullscreen_check.setChecked(
             bool(config.get("idle_chat.silent_in_fullscreen", False)))
-
-        self.monitor_check.setChecked(bool(config.get("agent_monitor.enabled", True)))
-        mode = config.get("agent_monitor.alert_mode", "both")
-        self.alert_combo.setCurrentIndex(ALERT_MODES.index(mode) if mode in ALERT_MODES else 0)
-        self.port_spin.setValue(int(config.get("agent_monitor.port", 8787)))
 
         self._refresh_gmail_status()
         self._refresh_banner()
@@ -377,6 +378,8 @@ class SettingsPanel(QWidget):
         updates = {name: (name == provider) for _label, name in PROVIDER_CHOICES}
         updates[MODEL_SETTING[provider]] = self.model_edit.text().strip()
         updates["local_api_url"] = self.local_url_edit.text().strip() or "http://localhost:11434/v1"
+        updates["vision_provider"] = self.vision_provider_combo.currentData()
+        updates["vision_model"] = self.vision_model_edit.text().strip()
         updates["microphone_active"] = self.mic_check.isChecked()
         updates["truth_mode"] = self.truth_check.isChecked()
         updates["self_hearing_guard"] = self.self_hearing_check.isChecked()
@@ -388,9 +391,6 @@ class SettingsPanel(QWidget):
         updates["idle_chat.give_up_after"] = self.give_up_spin.value()
         updates["idle_chat.silent_when_mic_off"] = self.idle_mic_check.isChecked()
         updates["idle_chat.silent_in_fullscreen"] = self.idle_fullscreen_check.isChecked()
-        updates["agent_monitor.enabled"] = self.monitor_check.isChecked()
-        updates["agent_monitor.alert_mode"] = self.alert_combo.currentText()
-        updates["agent_monitor.port"] = self.port_spin.value()
 
         config.update(updates)
         # set_key keeps any spare keys behind the first, so saving a form
@@ -398,6 +398,7 @@ class SettingsPanel(QWidget):
         config.set_key("openrouter", self.openrouter_key.text())
         config.set_key("google", self.google_key.text())
         config.set_key("groq", self.groq_key.text())
+        config.set_key("vision", self.vision_key.text())
 
         self._refresh_banner()
         self._flash("Saved.")
