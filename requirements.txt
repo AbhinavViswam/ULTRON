@@ -25,8 +25,5 @@ uiautomation
 mss
 pytesseract
 vosk
-fastapi
-uvicorn
-websockets
 opencv-python
 mediapipe==0.10.14
