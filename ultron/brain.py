@@ -1079,9 +1079,15 @@ class Brain:
                     f"{number}. {category}{memory['key']}: {memory['value']} "
                     f"(importance {memory['importance']}){when}"
                 )
-            return (f"I remember {len(memories)} thing(s) about you, sir:\n"
+            result = (f"I remember {len(memories)} thing(s) about you, sir:\n"
                     + "\n".join(lines)
                     + "\nSay the number or describe one to have it forgotten.")
+            
+            om = getattr(self, "output_manager", None)
+            if om:
+                om.enqueue(result, source="system")
+                
+            return result
 
         def delete_memory(which: str) -> str:
             """Forgets one saved memory, by its number from list_memories or by describing it.

@@ -22,6 +22,7 @@ from ultron.ui.orb import Orb, OrbLabel
 from ultron.ui.routines_window import RoutinesWindow
 from ultron.ui.settings_window import SettingsWindow
 from ultron.ui.tool_usage_window import ToolUsageWindow
+from ultron.ui.memories_window import MemoriesWindow
 
 SCREEN_MARGIN = 34
 # Space between the orb and the nearest card.
@@ -83,6 +84,9 @@ class OrbOverlay(QWidget):
             self._run_routine_now,
         )
         self.tool_usage_window = ToolUsageWindow(
+            get_db=lambda: self.core.brain.db if self.core else None
+        )
+        self.memories_window = MemoriesWindow(
             get_db=lambda: self.core.brain.db if self.core else None
         )
 
@@ -293,6 +297,10 @@ class OrbOverlay(QWidget):
         tool_history_action.triggered.connect(self._show_tool_history)
         self.menu.addAction(tool_history_action)
 
+        memories_action = QAction("Memories", self)
+        memories_action.triggered.connect(self._show_memories)
+        self.menu.addAction(memories_action)
+
         self.menu.addSeparator()
         quit_action = QAction("Quit Ultron", self)
         quit_action.triggered.connect(self.quit_app)
@@ -355,6 +363,9 @@ class OrbOverlay(QWidget):
         
     def _show_tool_history(self):
         self.tool_usage_window.show_panel()
+
+    def _show_memories(self):
+        self.memories_window.show_panel()
 
     def _run_routine_now(self, name: str):
         """Queues a routine, the same way asking for it out loud would."""
