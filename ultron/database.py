@@ -136,6 +136,21 @@ class Database:
             ''', (tool_name, 1 if success else 0))
             conn.commit()
 
+    def clear_tool_usage(self):
+        """Clears all tool usage history from the database and legacy json."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tool_usage")
+            conn.commit()
+            
+        import os
+        json_path = os.path.join(os.path.dirname(self.db_path), "tool_usage.json")
+        if os.path.exists(json_path):
+            try:
+                os.remove(json_path)
+            except Exception:
+                pass
+
     def get_tool_statistics(self):
         """Returns aggregate usage statistics for all tools, sorted by total uses."""
         import json, os

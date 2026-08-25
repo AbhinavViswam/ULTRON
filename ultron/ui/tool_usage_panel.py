@@ -45,6 +45,11 @@ class ToolUsagePanel(QWidget):
         title.setObjectName("sectionHeader")
         top.addWidget(title, 1)
 
+        clear = QPushButton("Clear")
+        clear.setObjectName("smallButton")
+        clear.clicked.connect(self.clear_history)
+        top.addWidget(clear)
+
         close = QPushButton("Done")
         close.setObjectName("smallButton")
         close.clicked.connect(self.closed.emit)
@@ -61,6 +66,12 @@ class ToolUsagePanel(QWidget):
         self._body.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll)
+
+    def clear_history(self):
+        db = self._get_db()
+        if db and hasattr(db, 'clear_tool_usage'):
+            db.clear_tool_usage()
+            self.reload()
 
     def reload(self):
         while self._body.count() > 1:
