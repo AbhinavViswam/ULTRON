@@ -42,7 +42,7 @@ def _watcher_loop():
         return
         
     with mss.mss() as sct:
-        monitor = sct.monitors[1]
+        monitor = sct.monitors[0]
         while _watcher_running:
             try:
                 shot = sct.grab(monitor)
@@ -155,7 +155,7 @@ def _annotate_and_encode(elements) -> str:
         return ""
         
     with mss.mss() as sct:
-        monitor = sct.monitors[1]
+        monitor = sct.monitors[0]
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
     
@@ -165,8 +165,18 @@ def _annotate_and_encode(elements) -> str:
     except:
         font = ImageFont.load_default()
         
+    monitor_left = monitor["left"]
+    monitor_top = monitor["top"]
+        
     for el in elements:
         x1, y1, x2, y2 = el["bbox"]
+        
+        # Offset coordinates by the monitor origin
+        x1 -= monitor_left
+        y1 -= monitor_top
+        x2 -= monitor_left
+        y2 -= monitor_top
+        
         # Draw red bounding box
         draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
         # Draw ID text background
@@ -243,10 +253,11 @@ def watch_screen_and_act(goal: str) -> str:
         return "pyautogui is required. pip install pyautogui"
         
     elements = _get_ui_elements()
-    if not elements:
-        return "Could not find any UI elements on screen."
-        
-    el_map_text = "\\n".join([f"ID {el['id']}: {el['type']} '{el['name']}'" for el in elements if el['name'] or el['type']])
+    
+    if elements:
+        el_map_text = "\\n".join([f"ID {el['id']}: {el['type']} '{el['name']}'" for el in elements if el['name'] or el['type']])
+    else:
+        el_map_text = "No interactive UI elements were found on screen."
     
     image_b64 = _annotate_and_encode(elements)
     if not image_b64:
@@ -315,3 +326,35 @@ Do not output markdown code blocks for commands. Output the command on its own l
         return f"Model responded, but no physical action was taken. Response: {result}"
         
     return result
+
+def run_background_screen_monitor(goal: str, output_manager=None) -> str:
+    """Helper that runs in a background thread to poll the screen until a condition is met."""
+    import threading
+    
+    def worker():
+        max_attempts = 30 # 5 minutes at 10s intervals
+        for _ in range(max_attempts):
+            time.sleep(10)
+            
+            image_b64 = _annotate_and_encode([])
+            if not image_b64:
+                continue
+                
+            prompt = f"The user is waiting for this visual event to occur on their screen: '{goal}'. Has it occurred yet? Analyze the screenshot carefully. If it HAS occurred, output EXACTLY 'YES' followed by a short description. If it HAS NOT occurred, output EXACTLY 'NO'."
+            
+            try:
+                result = _call_vision_model(prompt, image_b64)
+                if result.strip().upper().startswith("YES"):
+                    if output_manager:
+                        output_manager.enqueue(f"Sir, the visual event you were waiting for has occurred: {result.strip()[3:].strip()}", source="watcher")
+                    return
+            except Exception as e:
+                print(f"[Watcher] Background monitor error: {e}")
+                
+        if output_manager:
+            output_manager.enqueue(f"Sir, I stopped watching for '{goal}' as the 5-minute timeout was reached.", source="watcher")
+            
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return f"I have started watching the screen in the background for: {goal}. I will notify you when it occurs."
+

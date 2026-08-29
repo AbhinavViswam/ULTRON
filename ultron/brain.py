@@ -1247,6 +1247,15 @@ class Brain:
             # functions: a saved workflow is still a tool call, and must not
             # be a way around the confirmation gate.
             return run_workflow(name, tool_functions=self._gated_tools())
+            
+        def monitor_screen_for_event(goal: str) -> str:
+            """Starts a background task that continuously watches the screen for a specific visual event to occur (e.g., a build completing, a video ending, a download finishing) and notifies the user when it happens.
+            Args:
+                goal: A detailed description of what visual change to wait for.
+            """
+            om = getattr(self, "output_manager", None)
+            from ultron.plugins.watcher_plugin import run_background_screen_monitor
+            return run_background_screen_monitor(goal, output_manager=om)
 
         # Register all tools in a dictionary
         self.tool_functions = {
@@ -1289,6 +1298,7 @@ class Brain:
             "start_watcher": start_watcher,
             "stop_watcher": stop_watcher,
             "watch_screen_and_act": watch_screen_and_act,
+            "monitor_screen_for_event": monitor_screen_for_event,
             # ── Browser (Dedicated Agent) ─────────────────────────────────
             "start_browser_agent": start_browser_agent,
             # ── Files & Clipboard ─────────────────────────────────────────
@@ -1403,6 +1413,7 @@ For any complex web browsing tasks (like searching Amazon, navigating websites, 
 You have a dedicated Screen Watcher Agent that can see the user's screen, find UI elements, and take physical actions (mouse clicks, typing) based on visual layout.
 - START/STOP: If the user asks you to start watching their screen or turn on the watcher, use `start_watcher`. If they ask to stop, use `stop_watcher`.
 - ACT: If the user asks you to interact with the screen, find a visual element, or answer a question about what is visible on the screen, use `watch_screen_and_act`. Pass the user's full visual goal into the tool. Do NOT try to guess coordinates yourself; the watcher agent will handle the visual analysis and physical execution.
+- MONITOR: If the user asks you to wait for something to happen on the screen, or notify them when a process (like a build, download, or installation) completes, use `monitor_screen_for_event`. Pass the visual goal to wait for.
 
 # GESTURE CONTROL (CAMERA)
 - If the user asks to "activate virtual mouse", "turn on gesture control", "use camera for mouse", or similar, use `toggle_gesture_control` with activate=true.
@@ -2421,7 +2432,10 @@ Your response: Let me find some great Malayalam songs for you, sir.
             while response_message.tool_calls:
                 tool_round += 1
                 # Convert message to dict format for safe history tracking (exclude_none=True for Gemini compatibility)
-                self.messages.append(response_message.model_dump(exclude_none=True))
+                msg_dict = response_message.model_dump(exclude_none=True)
+                if "content" not in msg_dict or msg_dict["content"] is None:
+                    msg_dict["content"] = ""
+                self.messages.append(msg_dict)
                 
                 # Execute each tool
                 for tool_call in response_message.tool_calls:
